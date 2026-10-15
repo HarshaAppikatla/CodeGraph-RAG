@@ -1,0 +1,6 @@
+google-genai
+google-antigravity
+neo4j
+qdrant-client
+python-dotenv
+ragas
