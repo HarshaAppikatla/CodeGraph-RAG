@@ -1,6 +1,6 @@
 import os
 import time
-from typing import List, Dict
+from typing import List, Dict, Any
 from google import genai
 from google.genai.errors import ServerError, ClientError, APIError
 from modules.agent_workflow import CodeGraphAgent, FALLBACK_MODELS
@@ -12,9 +12,11 @@ class RAGEvaluator:
     def __init__(self, agent: CodeGraphAgent):
         self.agent = agent
         api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is not set.")
         self.ai_client = genai.Client(api_key=api_key)
 
-    def evaluate_query(self, query: str) -> Dict[str, str]:
+    def evaluate_query(self, query: str) -> Dict[str, Any]:
         """Runs a query through the agent and evaluates the generated response."""
         start_time = time.time()
         agent_response = self.agent.query(query)
@@ -40,10 +42,17 @@ Provide concise evaluation scores (1-5 for Faithfulness, 1-5 for Relevancy) and 
                     model=model,
                     contents=eval_prompt,
                 )
-                eval_result_text = eval_result.text
-                break
-            except (ClientError, ServerError, APIError):
+                if eval_result and eval_result.text:
+                    eval_result_text = eval_result.text
+                    break
+            except (ClientError, ServerError, APIError, Exception) as e:
+                err_msg = str(e)
+                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    time.sleep(2)
                 continue
+
+        if not eval_result_text:
+            eval_result_text = "⚠️ Evaluation failed: All fallback models were unavailable or hit quota limits."
 
         return {
             "query": query,
@@ -68,15 +77,22 @@ if __name__ == "__main__":
 
     print("🧪 Starting CodeGraph-RAG Benchmark Evaluation...\n")
     
-    for idx, test_query in enumerate(benchmark_queries, start=1):
-        print(f"================ Query {idx}/{len(benchmark_queries)} ================")
-        print(f"❓ Query: '{test_query}'")
-        
-        metrics = evaluator.evaluate_query(test_query)
-        
-        print(f"⏱️ Latency: {metrics['latency_seconds']}s")
-        print("📊 Evaluation Output:")
-        print(metrics['evaluation'])
-        print("\n")
-
-    agent.close()
+    try:
+        for idx, test_query in enumerate(benchmark_queries, start=1):
+            print(f"================ Query {idx}/{len(benchmark_queries)} ================")
+            print(f"❓ Query: '{test_query}'")
+            
+            metrics = evaluator.evaluate_query(test_query)
+            
+            print(f"⏱️ Latency: {metrics['latency_seconds']}s")
+            print("📊 Evaluation Output:")
+            print(metrics['evaluation'])
+            print("\n")
+    finally:
+        # Explicitly close Qdrant and Neo4j connections to eliminate interpreter teardown warnings
+        if hasattr(vector_store, "client") and hasattr(vector_store.client, "close"):
+            try:
+                vector_store.client.close()
+            except Exception:
+                pass
+        agent.close()

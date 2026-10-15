@@ -1,5 +1,5 @@
 from neo4j import GraphDatabase
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 class Neo4jGraphStore:
     """Handles connection and node/relationship creation in Neo4j for AST structures."""
@@ -8,46 +8,66 @@ class Neo4jGraphStore:
         self.driver = GraphDatabase.driver(uri, auth=(user, passw))
 
     def close(self):
-        self.driver.close()
+        if self.driver:
+            self.driver.close()
 
     def ingest_ast(self, filepath: str, ast_data: Dict[str, Any]):
-        """Creates File, Class, and Function nodes and connects them with relationships."""
+        """Creates File, Class, Function, and Constant nodes with edges in Neo4j."""
         with self.driver.session() as session:
-            session.execute_write(self._create_graph, filepath, ast_data)
+            # 1. Merge File Node
+            session.run(
+                "MERGE (f:File {path: $path})",
+                path=filepath
+            )
 
-    @staticmethod
-    def _create_graph(tx, filepath: str, ast_data: Dict[str, Any]):
-        # 1. Create File Node
-        query_file = "MERGE (f:File {path: $filepath})"
-        tx.run(query_file, filepath=filepath)
+            # 2. Ingest Functions & Methods
+            for fn in ast_data.get("functions", []):
+                fn_name = fn.get("name", "unknown")
+                session.run(
+                    """
+                    MATCH (f:File {path: $file_path})
+                    MERGE (fn:Function {name: $fn_name, file: $file_path})
+                    MERGE (f)-[:DEFINES_FUNCTION]->(fn)
+                    """,
+                    file_path=filepath,
+                    fn_name=fn_name
+                )
 
-        # 2. Create Class Nodes & CONTAINS_CLASS relationships
-        for cls in ast_data.get("classes", []):
-            query_class = """
-            MERGE (c:Class {name: $class_name, file: $filepath})
-            ON CREATE SET c.docstring = $docstring
-            WITH c
-            MATCH (f:File {path: $filepath})
-            MERGE (f)-[:CONTAINS_CLASS]->(c)
-            """
-            tx.run(query_class, class_name=cls["name"], filepath=filepath, docstring=cls["docstring"])
+            # 3. Ingest Classes
+            for cls in ast_data.get("classes", []):
+                cls_name = cls.get("name", "unknown")
+                
+                # Extract clean list of string method names for Neo4j primitive array compatibility
+                raw_methods = cls.get("methods", [])
+                method_names = []
+                for m in raw_methods:
+                    if isinstance(m, dict):
+                        method_names.append(m.get("name", "unknown"))
+                    else:
+                        method_names.append(str(m))
 
-            # Connect methods inside class
-            for method in cls.get("methods", []):
-                query_method = """
-                MATCH (c:Class {name: $class_name, file: $filepath})
-                MERGE (m:Function {name: $method_name, file: $filepath})
-                MERGE (c)-[:HAS_METHOD]->(m)
-                """
-                tx.run(query_method, class_name=cls["name"], method_name=method, filepath=filepath)
+                session.run(
+                    """
+                    MATCH (f:File {path: $file_path})
+                    MERGE (c:Class {name: $cls_name, file: $file_path})
+                    SET c.methods = $methods, c.docstring = $docstring
+                    MERGE (f)-[:CONTAINS_CLASS]->(c)
+                    """,
+                    file_path=filepath,
+                    cls_name=cls_name,
+                    methods=method_names,
+                    docstring=cls.get("docstring", "")
+                )
 
-        # 3. Create Standalone Function Nodes
-        for fn in ast_data.get("functions", []):
-            query_fn = """
-            MERGE (fn:Function {name: $fn_name, file: $filepath})
-            ON CREATE SET fn.args = $args, fn.docstring = $docstring
-            WITH fn
-            MATCH (f:File {path: $filepath})
-            MERGE (f)-[:DEFINES_FUNCTION]->(fn)
-            """
-            tx.run(query_fn, fn_name=fn["name"], filepath=filepath, args=fn["args"], docstring=fn["docstring"])
+            # 4. Ingest Global Constants
+            for const in ast_data.get("constants", []):
+                const_name = const.get("name", "unknown")
+                session.run(
+                    """
+                    MATCH (f:File {path: $file_path})
+                    MERGE (k:Constant {name: $const_name, file: $file_path})
+                    MERGE (f)-[:DEFINES_CONSTANT]->(k)
+                    """,
+                    file_path=filepath,
+                    const_name=const_name
+                )
