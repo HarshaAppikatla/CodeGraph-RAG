@@ -52,7 +52,7 @@ class Neo4jGraphStore:
                 pass
 
     def ingest_ast(self, filepath: str, ast_data: Dict[str, Any]):
-        """Ingests AST components into Neo4j with rich structural relationships."""
+        """Ingests AST components into Neo4j, safely persisting anonymous entities without dropping relationships."""
         if not self.driver or not ast_data:
             return
 
@@ -77,7 +77,10 @@ class Neo4jGraphStore:
         MATCH (f:File {path: $filepath})
         MATCH (c:Class {name: $class_name})
         MERGE (fn:Function {name: $full_method_name})
-        SET fn.short_name = $short_name, fn.type = 'method', fn.file = $filepath
+        SET fn.short_name = $short_name, 
+            fn.type = 'method', 
+            fn.file = $filepath,
+            fn.is_anonymous = $is_anon
         MERGE (c)-[:HAS_METHOD]->(fn)
         MERGE (f)-[:CONTAINS_FUNCTION]->(fn)
         """
@@ -85,7 +88,10 @@ class Neo4jGraphStore:
         cypher_func = """
         MATCH (f:File {path: $filepath})
         MERGE (fn:Function {name: $func_name})
-        SET fn.short_name = $short_name, fn.type = 'function', fn.file = $filepath
+        SET fn.short_name = $short_name, 
+            fn.type = 'function', 
+            fn.file = $filepath,
+            fn.is_anonymous = $is_anon
         MERGE (f)-[:CONTAINS_FUNCTION]->(fn)
         """
 
@@ -106,19 +112,20 @@ class Neo4jGraphStore:
                 session.run(cypher_file, filepath=filepath)
 
                 for cls in ast_data.get("classes", []):
-                    c_name = cls.get("name")
-                    if c_name and c_name != "unnamed_entity":
-                        session.run(cypher_class, filepath=filepath, class_name=c_name)
+                    c_name = cls.get("name") or "AnonClass"
+                    session.run(cypher_class, filepath=filepath, class_name=c_name)
 
-                        for parent in cls.get("extends", []):
-                            if parent and parent != "unnamed_entity":
-                                session.run(cypher_extends, sub_class=c_name, super_class=parent)
+                    for parent in cls.get("extends", []):
+                        if parent and parent != "unnamed_entity":
+                            session.run(cypher_extends, sub_class=c_name, super_class=parent)
 
                 for fn in ast_data.get("functions", []):
                     full_name = fn.get("name")
                     if not full_name or full_name == "unnamed_entity":
-                        continue
+                        full_name = f"anon_func_{os.path.basename(filepath)}_L{fn.get('line', 0)}"
+
                     short_name = fn.get("short_name", full_name)
+                    is_anon = "anon_" in full_name or "lambda_" in full_name
 
                     if fn.get("type") == "method" and "." in full_name:
                         c_name = full_name.split(".")[0]
@@ -128,6 +135,7 @@ class Neo4jGraphStore:
                             class_name=c_name,
                             full_method_name=full_name,
                             short_name=short_name,
+                            is_anon=is_anon,
                         )
                     else:
                         session.run(
@@ -135,12 +143,13 @@ class Neo4jGraphStore:
                             filepath=filepath,
                             func_name=full_name,
                             short_name=short_name,
+                            is_anon=is_anon,
                         )
 
                 for call in ast_data.get("calls", []):
                     caller = call.get("caller")
                     callee = call.get("callee")
-                    if caller and callee and caller != "unnamed_entity" and callee != "unnamed_entity":
+                    if caller and callee:
                         session.run(cypher_call, caller_name=caller, callee_name=callee)
 
                 for imp in ast_data.get("imports", []):
@@ -166,7 +175,6 @@ class Neo4jGraphStore:
         if not self.driver:
             return default_error_res
 
-        # Supports deep call traversal up to 5 hops
         cypher = """
         MATCH (target) WHERE target.name = $symbol OR target.short_name = $symbol
         OPTIONAL MATCH (caller:Function)-[:CALLS*1..5]->(target)
@@ -223,3 +231,52 @@ class Neo4jGraphStore:
         except Exception as e:
             default_error_res["message"] = f"Impact Analysis Cypher execution failed: {e}"
             return default_error_res
+
+    def get_file_graph(self, filepath: str) -> Dict[str, Any]:
+        """Retrieves structural nodes and edges (classes, functions, calls, imports) for a specific file."""
+        if not self.driver:
+            return {"error": "Neo4j driver not connected."}
+
+        cypher = """
+        MATCH (f:File {path: $filepath})
+        OPTIONAL MATCH (f)-[:CONTAINS_CLASS]->(c:Class)
+        OPTIONAL MATCH (c)-[:HAS_METHOD]->(m:Function)
+        OPTIONAL MATCH (f)-[:CONTAINS_FUNCTION]->(fn:Function)
+        OPTIONAL MATCH (f)-[:IMPORTS]->(imp:Import)
+        OPTIONAL MATCH (caller:Function)-[:CALLS]->(callee:Function) 
+            WHERE caller.file = $filepath OR callee.file = $filepath
+        RETURN
+            f.path AS file_path,
+            collect(DISTINCT c.name) AS classes,
+            collect(DISTINCT fn.name) AS top_functions,
+            collect(DISTINCT m.name) AS class_methods,
+            collect(DISTINCT imp.code) AS imports,
+            collect(DISTINCT {caller: caller.name, callee: callee.name}) AS call_edges
+        """
+
+        try:
+            with self.driver.session() as session:
+                result = session.run(cypher, filepath=filepath)
+                records = list(result)
+
+                if not records or not records[0]["file_path"]:
+                    return {
+                        "found": False,
+                        "filepath": filepath,
+                        "message": f"File '{filepath}' not found in knowledge graph."
+                    }
+
+                rec = records[0]
+                all_funcs = list(set([f for f in rec["top_functions"] if f] + [m for m in rec["class_methods"] if m]))
+                valid_calls = [c for c in rec["call_edges"] if c.get("caller") and c.get("callee")]
+
+                return {
+                    "found": True,
+                    "filepath": rec["file_path"],
+                    "classes": [c for c in rec["classes"] if c],
+                    "functions": all_funcs,
+                    "imports": [i for i in rec["imports"] if i],
+                    "call_relationships": valid_calls
+                }
+        except Exception as e:
+            return {"error": f"Failed to retrieve file graph for '{filepath}': {e}"}

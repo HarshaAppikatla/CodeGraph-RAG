@@ -1,5 +1,6 @@
 import os
-from typing import List, Dict, Any, Tuple
+import atexit
+from typing import List, Dict, Any, Tuple, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from google import genai
@@ -20,7 +21,6 @@ class CodeVectorStore:
         qdrant_path: str = "./qdrant_data",
     ):
         self.collection_name = collection_name
-
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY environment variable is missing.")
@@ -29,10 +29,20 @@ class CodeVectorStore:
         self.qdrant = QdrantClient(path=qdrant_path)
         self.client = self.qdrant
 
+        # Safely register client cleanup on process exit
+        atexit.register(self._safe_close)
+
         self.embedding_model, self.vector_size = self._auto_detect_embedding_model()
         print(f"🎯 Vector Store initialized with model '{self.embedding_model}' ({self.vector_size} dims)")
-
         self._ensure_collection()
+
+    def _safe_close(self):
+        """Safely closes the Qdrant client connection prior to interpreter shutdown."""
+        if hasattr(self, "client") and self.client is not None:
+            try:
+                self.client.close()
+            except Exception:
+                pass
 
     def _auto_detect_embedding_model(self) -> Tuple[str, int]:
         """Probes candidate models to select an active embedding model and its vector size."""
@@ -67,6 +77,7 @@ class CodeVectorStore:
         """Safely wipes and recreates the Qdrant collection to clear stale vectors."""
         if self.qdrant.collection_exists(self.collection_name):
             self.qdrant.delete_collection(self.collection_name)
+
         self.qdrant.create_collection(
             collection_name=self.collection_name,
             vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
