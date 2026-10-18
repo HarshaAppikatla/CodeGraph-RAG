@@ -22,6 +22,11 @@ try:
     from modules.vector_store import CodeVectorStore
     from modules.graph_store import Neo4jGraphStore
     from modules.agent_workflow import CodeGraphAgent
+    from modules.repo_ingestor import RepositoryIngestor
+    try:
+        from modules.ast_parser import CodeASTParser
+    except ImportError:
+        CodeASTParser = None
 finally:
     sys.stdout = _real_stdout
 
@@ -33,14 +38,19 @@ class CodeGraphMCPServer:
         self.vector_store = None
         self.graph_store = None
         self.agent = None
+        self.ast_parser = None
+        self.repo_ingestor = None
         self._init_backend()
 
     def _init_backend(self):
-        """Initializes storage engines and RAG agent quietly."""
+        """Initializes storage engines, RAG agent, and repository ingestor quietly."""
         sys.stderr.write("🚀 Starting CodeGraph-RAG MCP Server...\n")
         try:
             self.vector_store = CodeVectorStore()
-            
+
+            if CodeASTParser:
+                self.ast_parser = CodeASTParser
+
             neo4j_uri = os.getenv("NEO4J_URI")
             neo4j_user = os.getenv("NEO4J_USERNAME", "neo4j")
             neo4j_pass = os.getenv("NEO4J_PASSWORD")
@@ -48,6 +58,13 @@ class CodeGraphMCPServer:
                 self.graph_store = Neo4jGraphStore(neo4j_uri, neo4j_user, neo4j_pass)
 
             self.agent = CodeGraphAgent(vector_store=self.vector_store)
+
+            # Initialize RepositoryIngestor with active stores
+            self.repo_ingestor = RepositoryIngestor(
+                vector_store=self.vector_store,
+                graph_store=self.graph_store,
+                ast_parser=self.ast_parser,
+            )
             sys.stderr.write("✅ CodeGraph-RAG MCP Server initialized successfully!\n")
         except Exception as e:
             sys.stderr.write(f"⚠️ Warning during MCP initialization: {e}\n")
@@ -63,11 +80,11 @@ class CodeGraphMCPServer:
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Natural language question or search query regarding the codebase structure or logic."
+                            "description": "Natural language question or search query regarding the codebase structure or logic.",
                         }
                     },
-                    "required": ["query"]
-                }
+                    "required": ["query"],
+                },
             },
             {
                 "name": "analyze_symbol_impact",
@@ -77,11 +94,11 @@ class CodeGraphMCPServer:
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "Name of the target function, method, or class (e.g. 'processPayment' or 'search_similar_code')."
+                            "description": "Name of the target function, method, or class (e.g. 'processPayment' or 'search_similar_code').",
                         }
                     },
-                    "required": ["symbol"]
-                }
+                    "required": ["symbol"],
+                },
             },
             {
                 "name": "get_file_graph",
@@ -91,12 +108,26 @@ class CodeGraphMCPServer:
                     "properties": {
                         "filepath": {
                             "type": "string",
-                            "description": "Relative file path (e.g. 'modules/vector_store.py' or 'modules/SampleService.java')."
+                            "description": "Relative file path (e.g. 'modules/vector_store.py' or 'modules/SampleService.java').",
                         }
                     },
-                    "required": ["filepath"]
-                }
-            }
+                    "required": ["filepath"],
+                },
+            },
+            {
+                "name": "ingest_repository",
+                "description": "Dynamically clones and indexes a remote Git repository URL or extracts a local ZIP archive into Qdrant and Neo4j.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_url": {
+                            "type": "string",
+                            "description": "Git repository HTTPS URL (e.g. https://github.com/octocat/Hello-World.git) or path to a local .zip file.",
+                        }
+                    },
+                    "required": ["repo_url"],
+                },
+            },
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,19 +137,16 @@ class CodeGraphMCPServer:
                 user_query = args.get("query", "")
                 if not user_query:
                     return {"isError": True, "content": [{"type": "text", "text": "Query parameter is required."}]}
-                
                 if self.agent:
                     response_text = self.agent.query(user_query)
                 else:
                     response_text = "RAG Agent unavailable."
-
                 return {"content": [{"type": "text", "text": response_text}]}
 
             elif tool_name == "analyze_symbol_impact":
                 symbol = args.get("symbol", "")
                 if not symbol:
                     return {"isError": True, "content": [{"type": "text", "text": "Symbol parameter is required."}]}
-
                 if self.graph_store:
                     impact_data = self.graph_store.analyze_impact(symbol)
                     formatted_json = json.dumps(impact_data, indent=2)
@@ -130,13 +158,27 @@ class CodeGraphMCPServer:
                 filepath = args.get("filepath", "")
                 if not filepath:
                     return {"isError": True, "content": [{"type": "text", "text": "Filepath parameter is required."}]}
-
                 if self.graph_store:
                     file_data = self.graph_store.get_file_graph(filepath)
                     formatted_json = json.dumps(file_data, indent=2)
                     return {"content": [{"type": "text", "text": f"Graph Structure for '{filepath}':\n{formatted_json}"}]}
                 else:
                     return {"isError": True, "content": [{"type": "text", "text": "Neo4j Graph Store not connected."}]}
+
+            elif tool_name == "ingest_repository":
+                repo_url = args.get("repo_url", "")
+                if not repo_url:
+                    return {"isError": True, "content": [{"type": "text", "text": "repo_url parameter is required."}]}
+                if not self.repo_ingestor:
+                    return {"isError": True, "content": [{"type": "text", "text": "Repository Ingestor not initialized."}]}
+
+                if repo_url.endswith(".zip"):
+                    res = self.repo_ingestor.ingest_zip_archive(repo_url)
+                else:
+                    res = self.repo_ingestor.ingest_git_repo(repo_url)
+
+                formatted_json = json.dumps(res, indent=2)
+                return {"content": [{"type": "text", "text": f"Ingestion Result:\n{formatted_json}"}]}
 
             else:
                 return {"isError": True, "content": [{"type": "text", "text": f"Unknown tool: {tool_name}"}]}
@@ -157,7 +199,6 @@ class CodeGraphMCPServer:
             line = line.strip()
             if not line:
                 continue
-
             try:
                 request = json.loads(line)
             except json.JSONDecodeError:
@@ -181,7 +222,6 @@ class CodeGraphMCPServer:
                         }
                     }
                 })
-
             elif method == "notifications/initialized":
                 pass  # Client notification confirmation
 
@@ -200,7 +240,6 @@ class CodeGraphMCPServer:
                 params = request.get("params", {})
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
-
                 result = self.handle_tool_call(tool_name, arguments)
                 self.send_response({
                     "jsonrpc": "2.0",
