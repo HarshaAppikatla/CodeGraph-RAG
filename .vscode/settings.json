@@ -1,1 +1,11 @@
-{}
+{
+  "python.analysis.indexing": false,
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/qdrant_data",
+    "**/.venv",
+    "**/venv"
+  ]
+}

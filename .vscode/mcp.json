@@ -1,10 +1,22 @@
 {
-	"servers": {
-		"my-mcp-server-ac51bd1c": {
-			"type": "stdio",
-			"command": "escape",
-			"args": []
-		}
-	},
-	"inputs": []
+    "servers": {
+        "codegraph-rag": {
+            "type": "stdio",
+            "command": "python",
+            "args": [
+                "/workspaces/CodeGraph-RAG/mcp_server.py"
+            ],
+            "env": {
+                "NEO4J_URI": "neo4j+s://ec073f17.databases.neo4j.io",
+                "NEO4J_USER": "ec073f17",
+                "NEO4J_PASSWORD": "BdFc2Ow5sCXTqZ8R9zLRf0EEDmOIpNvoPa1E7ixv0iQ"
+            }
+        },
+        "my-mcp-server-ac51bd1c": {
+            "type": "stdio",
+            "command": "escape",
+            "args": []
+        }
+    },
+    "inputs": []
 }

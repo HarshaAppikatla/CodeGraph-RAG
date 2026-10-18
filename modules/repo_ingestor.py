@@ -7,6 +7,22 @@ import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+# Attempt auto-importing workspace stores
+try:
+    from modules.vector_store import CodeVectorStore
+except ImportError:
+    CodeVectorStore = None
+
+try:
+    from modules.graph_store import Neo4jGraphStore
+except ImportError:
+    Neo4jGraphStore = None
+
+try:
+    from modules.ast_parser import CodeASTParser
+except ImportError:
+    CodeASTParser = None
+
 # Default directory & file patterns to ignore during ingestion
 DEFAULT_IGNORE_PATTERNS = {
     ".git",
@@ -43,9 +59,27 @@ class RepositoryIngestor:
         graph_store: Optional[Any] = None,
         ast_parser: Optional[Any] = None,
     ):
-        self.vector_store = vector_store
-        self.graph_store = graph_store
-        self.ast_parser = ast_parser
+        # Auto-initialize VectorStore if omitted and available
+        if vector_store is None and CodeVectorStore is not None:
+            try:
+                self.vector_store = CodeVectorStore()
+            except Exception as e:
+                self.log(f"⚠️ VectorStore auto-init notice: {e}")
+                self.vector_store = None
+        else:
+            self.vector_store = vector_store
+
+        # Auto-initialize GraphStore if omitted and available
+        if graph_store is None and Neo4jGraphStore is not None:
+            try:
+                self.graph_store = Neo4jGraphStore()
+            except Exception as e:
+                self.log(f"⚠️ GraphStore auto-init notice: {e}")
+                self.graph_store = None
+        else:
+            self.graph_store = graph_store
+
+        self.ast_parser = ast_parser or CodeASTParser
 
     def log(self, message: str) -> None:
         """Logs status messages strictly to sys.stderr to avoid polluting stdio JSON-RPC."""
@@ -70,43 +104,35 @@ class RepositoryIngestor:
         """Traverses the root directory and collects valid text/code source files."""
         root_path = Path(root_dir).resolve()
         valid_files: List[Path] = []
-
         for path in root_path.rglob("*"):
             if path.is_file():
                 # Skip ignored directory patterns
                 rel_parts = set(path.relative_to(root_path).parts[:-1])
                 if rel_parts.intersection(DEFAULT_IGNORE_PATTERNS):
                     continue
-
                 # Skip hidden files and binary formats
                 if path.name.startswith(".") or self.is_binary_file(path):
                     continue
-
                 valid_files.append(path)
-
         return valid_files
 
     def ingest_git_repo(self, repo_url: str, branch: Optional[str] = None) -> Dict[str, Any]:
         """Clones a remote Git repository into a temporary directory and indexes it."""
         self.log(f"📥 Cloning remote Git repository: {repo_url}")
         temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
-
         try:
             clone_cmd = ["git", "clone", "--depth", "1"]
             if branch:
                 clone_cmd.extend(["-b", branch])
             clone_cmd.extend([repo_url, temp_dir])
-
             subprocess.run(
                 clone_cmd,
                 capture_output=True,
                 text=True,
                 check=True,
             )
-
             source_files = self.collect_source_files(temp_dir)
             self.log(f"✅ Found {len(source_files)} source files for indexing.")
-
             indexing_summary = self._index_files(temp_dir, source_files)
             return {
                 "status": "success",
@@ -114,7 +140,6 @@ class RepositoryIngestor:
                 "total_files": len(source_files),
                 "indexing_summary": indexing_summary,
             }
-
         except subprocess.CalledProcessError as e:
             err_msg = e.stderr.strip() if e.stderr else str(e)
             self.log(f"❌ Git clone error: {err_msg}")
@@ -126,10 +151,8 @@ class RepositoryIngestor:
         """Extracts a local ZIP archive safely into a temporary directory and indexes it."""
         if not os.path.exists(zip_path):
             return {"status": "error", "message": f"ZIP file not found at: {zip_path}"}
-
         self.log(f"📦 Extracting ZIP archive: {zip_path}")
         temp_dir = tempfile.mkdtemp(prefix="codegraph_zip_")
-
         try:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 # Zip-Slip protection
@@ -138,12 +161,9 @@ class RepositoryIngestor:
                     member_path = os.path.realpath(os.path.join(temp_dir, member))
                     if not member_path.startswith(resolved_temp):
                         raise Exception(f"Zip slip security risk detected in entry: {member}")
-                
                 zip_ref.extractall(temp_dir)
-
             source_files = self.collect_source_files(temp_dir)
             self.log(f"✅ Found {len(source_files)} source files for indexing.")
-
             indexing_summary = self._index_files(temp_dir, source_files)
             return {
                 "status": "success",
@@ -151,7 +171,6 @@ class RepositoryIngestor:
                 "total_files": len(source_files),
                 "indexing_summary": indexing_summary,
             }
-
         except zipfile.BadZipFile:
             return {"status": "error", "message": "Invalid or corrupted ZIP archive."}
         except Exception as e:
@@ -165,62 +184,83 @@ class RepositoryIngestor:
         indexed_graph_nodes = 0
         base_path = Path(base_dir).resolve()
 
+        batch_vector_items = []
+
         for idx, file_path in enumerate(files, start=1):
             rel_path = str(file_path.relative_to(base_path))
-
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
                 if not content.strip():
                     continue
 
-                # 1. Upsert into Qdrant Vector Store
-                if self.vector_store:
-                    try:
-                        metadata = {
-                            "filepath": rel_path,
-                            "filename": file_path.name,
-                            "extension": file_path.suffix,
-                        }
-                        if self.vector_store.upsert_code_snippet(
-                            doc_id=idx,
-                            code_snippet=content,
-                            metadata=metadata,
-                        ):
-                            indexed_vectors += 1
-                    except Exception as vec_err:
-                        self.log(f"⚠️ Vector store indexing failed for '{rel_path}': {vec_err}")
+                metadata = {
+                    "filepath": rel_path,
+                    "filename": file_path.name,
+                    "extension": file_path.suffix,
+                }
 
-                # 2. Parse AST & populate Neo4j Graph Store
+                # Prepare Vector store batch item
+                if self.vector_store:
+                    batch_vector_items.append({
+                        "doc_id": idx,
+                        "code_snippet": content,
+                        "metadata": metadata,
+                    })
+
+                # Process AST Parsing and Graph Ingestion
                 if self.graph_store and self.ast_parser:
                     try:
                         ast_data = None
-                        # Check if ast_parser is passed as class reference or instance
                         if isinstance(self.ast_parser, type):
-                            try:
-                                parser_inst = self.ast_parser(str(file_path))
-                                if hasattr(parser_inst, "parse"):
-                                    ast_data = parser_inst.parse()
-                                elif hasattr(parser_inst, "parse_code"):
-                                    ast_data = parser_inst.parse_code(content, language=file_path.suffix)
-                            except Exception:
-                                parser_inst = self.ast_parser()
-                                if hasattr(parser_inst, "parse_code"):
-                                    ast_data = parser_inst.parse_code(content, language=file_path.suffix)
-                        elif hasattr(self.ast_parser, "parse_code"):
-                            ast_data = self.ast_parser.parse_code(content, language=file_path.suffix)
-                        elif hasattr(self.ast_parser, "parse"):
-                            ast_data = self.ast_parser.parse()
+                            parser_inst = self.ast_parser(str(file_path), code_str=content)
+                            if hasattr(parser_inst, "extract_structures"):
+                                ast_data = parser_inst.extract_structures()
+                            elif hasattr(parser_inst, "parse"):
+                                ast_data = parser_inst.parse()
+                        elif hasattr(self.ast_parser, "extract_structures"):
+                            ast_data = self.ast_parser.extract_structures()
+                        elif hasattr(self.ast_parser, "parse_file"):
+                            ast_data = self.ast_parser.parse_file(str(file_path), content)
 
                         if ast_data:
-                            self.graph_store.build_file_node_graph(rel_path, ast_data)
-                            indexed_graph_nodes += 1
+                            if hasattr(self.graph_store, "ingest_ast"):
+                                self.graph_store.ingest_ast(rel_path, ast_data)
+                            elif hasattr(self.graph_store, "build_file_node_graph"):
+                                self.graph_store.build_file_node_graph(rel_path, ast_data)
+
+                            nodes_count = (
+                                len(ast_data.get("classes", []))
+                                + len(ast_data.get("functions", []))
+                                + len(ast_data.get("imports", []))
+                            )
+                            indexed_graph_nodes += max(1, nodes_count)
                     except Exception as ast_err:
                         self.log(f"⚠️ AST parsing skipped for '{rel_path}': {ast_err}")
 
             except Exception as file_err:
                 self.log(f"⚠️ Skipping file '{rel_path}': {file_err}")
 
+        # Execute Vector Batch Upsert
+        if self.vector_store and batch_vector_items:
+            try:
+                if hasattr(self.vector_store, "upsert_code_batch"):
+                    indexed_vectors = self.vector_store.upsert_code_batch(batch_vector_items)
+                else:
+                    for item in batch_vector_items:
+                        if self.vector_store.upsert_code_snippet(
+                            doc_id=item["doc_id"],
+                            code_snippet=item["code_snippet"],
+                            metadata=item["metadata"],
+                        ):
+                            indexed_vectors += 1
+            except Exception as vec_err:
+                self.log(f"⚠️ Vector batch indexing failed: {vec_err}")
+
         return {
             "vector_chunks": indexed_vectors,
             "graph_nodes": indexed_graph_nodes,
         }
+
+
+# Class Name Alias for backward compatibility across server tools
+RepoIngestor = RepositoryIngestor

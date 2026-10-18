@@ -1,42 +1,53 @@
 import os
+import sys
 import atexit
 from typing import List, Dict, Any, Tuple, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from google import genai
+from sentence_transformers import SentenceTransformer
 
-CANDIDATE_EMBED_MODELS = [
-    "gemini-embedding-001",
-    "text-embedding-004",
-    "embedding-001",
-]
+DEFAULT_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 class CodeVectorStore:
-    """Manages vector storage and code embeddings using Qdrant and Google Gemini."""
+    """Manages local vector storage and code embeddings using Qdrant and SentenceTransformers."""
 
     def __init__(
         self,
         collection_name: str = "code_chunks",
         qdrant_path: str = "./qdrant_data",
+        model_name: str = DEFAULT_EMBED_MODEL,
     ):
         self.collection_name = collection_name
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY environment variable is missing.")
+        self.qdrant_path = qdrant_path
+        self.model_name = model_name
 
-        self.ai_client = genai.Client(api_key=api_key)
-        self.qdrant = QdrantClient(path=qdrant_path)
+        # 1. Initialize Local SentenceTransformer Model
+        self.log(f"🎯 Initializing local embedding model '{self.model_name}'...")
+        try:
+            self.model = SentenceTransformer(self.model_name)
+            self.vector_size = self.model.get_sentence_embedding_dimension()
+            self.log(f"✅ Local model loaded successfully ({self.vector_size} dims).")
+        except Exception as e:
+            self.log(f"❌ Failed to load local model '{self.model_name}': {e}")
+            raise e
+
+        # 2. Initialize Qdrant Client
+        self.qdrant = QdrantClient(path=self.qdrant_path)
         self.client = self.qdrant
 
-        # Safely register client cleanup on process exit
+        # Clean client cleanup on process exit
         atexit.register(self._safe_close)
 
-        self.embedding_model, self.vector_size = self._auto_detect_embedding_model()
-        print(f"🎯 Vector Store initialized with model '{self.embedding_model}' ({self.vector_size} dims)")
+        # 3. Bootstrap Collection
         self._ensure_collection()
 
-    def _safe_close(self):
+    def log(self, message: str) -> None:
+        """Logs messages to sys.stderr to preserve stdout for MCP JSON-RPC protocol messages."""
+        sys.stderr.write(f"{message}\n")
+        sys.stderr.flush()
+
+    def _safe_close(self) -> None:
         """Safely closes the Qdrant client connection prior to interpreter shutdown."""
         if hasattr(self, "client") and self.client is not None:
             try:
@@ -44,75 +55,74 @@ class CodeVectorStore:
             except Exception:
                 pass
 
-    def _auto_detect_embedding_model(self) -> Tuple[str, int]:
-        """Probes candidate models to select an active embedding model and its vector size."""
-        for model_name in CANDIDATE_EMBED_MODELS:
-            try:
-                response = self.ai_client.models.embed_content(
-                    model=model_name,
-                    contents="probe",
+    def _ensure_collection(self) -> None:
+        """Creates or recreates the Qdrant collection if missing or dimension mismatched."""
+        try:
+            if self.qdrant.collection_exists(self.collection_name):
+                info = self.qdrant.get_collection(self.collection_name)
+                existing_dim = info.config.params.vectors.size
+                if existing_dim != self.vector_size:
+                    self.log(
+                        f"⚠️ Vector dimension mismatch ({existing_dim} vs {self.vector_size}). "
+                        f"Recreating collection '{self.collection_name}'..."
+                    )
+                    self.reset_collection()
+            else:
+                self.qdrant.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
                 )
-                vec = []
-                if hasattr(response, "embedding") and response.embedding:
-                    vec = response.embedding.values
-                elif hasattr(response, "embeddings") and response.embeddings:
-                    vec = response.embeddings[0].values
+        except Exception as e:
+            self.log(f"❌ Qdrant collection initialization error: {e}")
 
-                if vec and len(vec) > 0:
-                    return model_name, len(vec)
-            except Exception:
-                continue
-
-        return "gemini-embedding-001", 3072
-
-    def _ensure_collection(self):
-        """Creates the Qdrant collection if it does not already exist."""
-        if not self.qdrant.collection_exists(self.collection_name):
+    def reset_collection(self) -> None:
+        """Safely wipes and recreates the Qdrant collection to clear stale vectors."""
+        try:
+            if self.qdrant.collection_exists(self.collection_name):
+                self.qdrant.delete_collection(self.collection_name)
             self.qdrant.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
             )
-
-    def reset_collection(self):
-        """Safely wipes and recreates the Qdrant collection to clear stale vectors."""
-        if self.qdrant.collection_exists(self.collection_name):
-            self.qdrant.delete_collection(self.collection_name)
-
-        self.qdrant.create_collection(
-            collection_name=self.collection_name,
-            vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
-        )
-        print(f"🧹 Cleaned stale vector embeddings in Qdrant collection '{self.collection_name}'.")
+            self.log(f"🧹 Cleaned stale vector embeddings in Qdrant collection '{self.collection_name}'.")
+        except Exception as e:
+            self.log(f"❌ Error resetting collection: {e}")
 
     def generate_embedding(self, text: str) -> List[float]:
-        """Generates a dense vector embedding for a given text snippet using Gemini."""
+        """Generates a dense vector embedding for a single code snippet using local CPU inference."""
         if not text or not text.strip():
             return []
-
         try:
-            response = self.ai_client.models.embed_content(
-                model=self.embedding_model,
-                contents=text,
-            )
-            if hasattr(response, "embedding") and response.embedding:
-                return response.embedding.values
-            elif hasattr(response, "embeddings") and response.embeddings:
-                return response.embeddings[0].values
-            return []
+            vector = self.model.encode(text, convert_to_numpy=True)
+            return vector.tolist()
         except Exception as e:
-            print(f"❌ Gemini Embedding Error ({self.embedding_model}): {e}")
+            self.log(f"❌ Local Embedding Error: {e}")
+            return []
+
+    def generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """Generates dense vector embeddings for a list of text snippets in batch."""
+        if not texts:
+            return []
+        try:
+            vectors = self.model.encode(texts, convert_to_numpy=True, batch_size=32, show_progress_bar=False)
+            return vectors.tolist()
+        except Exception as e:
+            self.log(f"❌ Batch Local Embedding Error: {e}")
             return []
 
     def upsert_code_snippet(self, doc_id: int, code_snippet: str, metadata: Dict[str, Any]) -> bool:
-        """Embeds a code snippet and stores it in Qdrant."""
+        """Embeds a single code snippet and stores it in Qdrant."""
         vector = self.generate_embedding(code_snippet)
         if not vector:
-            print(f"   ⚠️ Skipping doc #{doc_id} ('{metadata.get('name', 'unnamed')}'): Embedding failed.")
+            self.log(
+                f"   ⚠️ Skipping doc #{doc_id} ('{metadata.get('filename', metadata.get('name', 'unnamed'))}'): Embedding failed."
+            )
             return False
 
         payload = {
             "snippet": code_snippet,
             "code": code_snippet,
+            "content": code_snippet,
             **metadata,
         }
 
@@ -121,8 +131,44 @@ class CodeVectorStore:
             self.qdrant.upsert(collection_name=self.collection_name, points=[point])
             return True
         except Exception as e:
-            print(f"   ❌ Qdrant Upsert Error for doc #{doc_id}: {e}")
+            self.log(f"   ❌ Qdrant Upsert Error for doc #{doc_id}: {e}")
             return False
+
+    def upsert_code_batch(self, batch_items: List[Dict[str, Any]]) -> int:
+        """
+        Embeds and upserts a list of documents in batch for maximum throughput.
+        Each item dict: {"doc_id": int, "code_snippet": str, "metadata": dict}
+        """
+        if not batch_items:
+            return 0
+
+        valid_items = [item for item in batch_items if item.get("code_snippet") and item["code_snippet"].strip()]
+        if not valid_items:
+            return 0
+
+        texts = [item["code_snippet"] for item in valid_items]
+        vectors = self.generate_embeddings_batch(texts)
+
+        if not vectors or len(vectors) != len(valid_items):
+            self.log("❌ Batch embedding size mismatch or failure.")
+            return 0
+
+        points = []
+        for item, vector in zip(valid_items, vectors):
+            payload = {
+                "snippet": item["code_snippet"],
+                "code": item["code_snippet"],
+                "content": item["code_snippet"],
+                **item.get("metadata", {}),
+            }
+            points.append(PointStruct(id=item["doc_id"], vector=vector, payload=payload))
+
+        try:
+            self.qdrant.upsert(collection_name=self.collection_name, points=points)
+            return len(points)
+        except Exception as e:
+            self.log(f"❌ Qdrant Batch Upsert Error: {e}")
+            return 0
 
     def search_similar_code(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """Searches Qdrant for code snippets semantically similar to the query."""
@@ -131,14 +177,22 @@ class CodeVectorStore:
             return []
 
         try:
-            response = self.qdrant.query_points(
-                collection_name=self.collection_name,
-                query=query_vector,
-                limit=limit,
-            )
-            return [point.payload for point in response.points]
+            if hasattr(self.qdrant, "query_points"):
+                response = self.qdrant.query_points(
+                    collection_name=self.collection_name,
+                    query=query_vector,
+                    limit=limit,
+                )
+                return [point.payload for point in response.points]
+            else:
+                response = self.qdrant.search(
+                    collection_name=self.collection_name,
+                    query_vector=query_vector,
+                    limit=limit,
+                )
+                return [point.payload for point in response]
         except Exception as e:
-            print(f"❌ Qdrant Search Error: {e}")
+            self.log(f"❌ Qdrant Search Error: {e}")
             return []
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:

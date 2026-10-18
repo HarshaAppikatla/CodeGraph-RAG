@@ -42,59 +42,85 @@ class CodeGraphMCPServer:
         self.repo_ingestor = None
         self._init_backend()
 
+    def log(self, message: str) -> None:
+        """Logs status strictly to sys.stderr to preserve stdout for JSON-RPC transport."""
+        sys.stderr.write(f"{message}\n")
+        sys.stderr.flush()
+
     def _init_backend(self):
         """Initializes storage engines, RAG agent, and repository ingestor quietly."""
-        sys.stderr.write("🚀 Starting CodeGraph-RAG MCP Server...\n")
+        self.log("🚀 Starting CodeGraph-RAG MCP Server...")
         try:
+            # 1. Initialize Vector Store
             self.vector_store = CodeVectorStore()
 
+            # 2. AST Parser class reference
             if CodeASTParser:
                 self.ast_parser = CodeASTParser
 
-            neo4j_uri = os.getenv("NEO4J_URI")
-            neo4j_user = os.getenv("NEO4J_USERNAME", "neo4j")
-            neo4j_pass = os.getenv("NEO4J_PASSWORD")
-            if neo4j_uri and neo4j_pass:
-                self.graph_store = Neo4jGraphStore(neo4j_uri, neo4j_user, neo4j_pass)
+            # 3. Initialize Graph Store with env support
+            neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+            neo4j_user = os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "neo4j"))
+            neo4j_pass = os.getenv("NEO4J_PASSWORD", "password")
 
-            self.agent = CodeGraphAgent(vector_store=self.vector_store)
+            try:
+                self.graph_store = Neo4jGraphStore(
+                    uri=neo4j_uri,
+                    user=neo4j_user,
+                    password=neo4j_pass,
+                )
+            except Exception as graph_err:
+                self.log(f"⚠️ Neo4j initialization skipped: {graph_err}")
+                self.graph_store = None
 
-            # Initialize RepositoryIngestor with active stores
+            # 4. Initialize RAG Agent
+            try:
+                self.agent = CodeGraphAgent(vector_store=self.vector_store)
+            except Exception as agent_err:
+                self.log(f"⚠️ RAG Agent initialization fallback: {agent_err}")
+                self.agent = None
+
+            # 5. Initialize Repository Ingestor
             self.repo_ingestor = RepositoryIngestor(
                 vector_store=self.vector_store,
                 graph_store=self.graph_store,
                 ast_parser=self.ast_parser,
             )
-            sys.stderr.write("✅ CodeGraph-RAG MCP Server initialized successfully!\n")
+            self.log("✅ CodeGraph-RAG MCP Server initialized successfully!")
         except Exception as e:
-            sys.stderr.write(f"⚠️ Warning during MCP initialization: {e}\n")
+            self.log(f"⚠️ Warning during MCP initialization: {e}")
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """Returns MCP tool declarations for IDE client registration."""
         return [
             {
                 "name": "search_codebase",
-                "description": "Performs semantic and hybrid code search across the codebase using vector search and AI context reasoning.",
+                "description": "Performs semantic vector search and AI context reasoning across code snippets in Qdrant.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Natural language question or search query regarding the codebase structure or logic.",
-                        }
+                            "description": "Natural language question or query regarding codebase logic or architecture.",
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "description": "Maximum number of code snippets to retrieve.",
+                            "default": 5,
+                        },
                     },
                     "required": ["query"],
                 },
             },
             {
                 "name": "analyze_symbol_impact",
-                "description": "Performs deep multi-hop Neo4j graph impact analysis to identify direct and transitive callers, subclasses, and files affected if a symbol changes.",
+                "description": "Performs multi-hop Neo4j graph impact analysis to identify callers, subclasses, and affected files.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "Name of the target function, method, or class (e.g. 'processPayment' or 'search_similar_code').",
+                            "description": "Target function, method, or class name (e.g., 'WebSocketConfig' or 'registerStompEndpoints').",
                         }
                     },
                     "required": ["symbol"],
@@ -102,13 +128,13 @@ class CodeGraphMCPServer:
             },
             {
                 "name": "get_file_graph",
-                "description": "Retrieves the structural graph layout of a file, including classes, methods, imports, and call relationships.",
+                "description": "Retrieves the structural layout of a file (classes, methods, imports, and method call edges).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "filepath": {
                             "type": "string",
-                            "description": "Relative file path (e.g. 'modules/vector_store.py' or 'modules/SampleService.java').",
+                            "description": "Relative file path within the repository.",
                         }
                     },
                     "required": ["filepath"],
@@ -122,7 +148,7 @@ class CodeGraphMCPServer:
                     "properties": {
                         "repo_url": {
                             "type": "string",
-                            "description": "Git repository HTTPS URL (e.g. https://github.com/octocat/Hello-World.git) or path to a local .zip file.",
+                            "description": "Git repository HTTPS URL or path to a local .zip archive.",
                         }
                     },
                     "required": ["repo_url"],
@@ -135,40 +161,45 @@ class CodeGraphMCPServer:
         try:
             if tool_name == "search_codebase":
                 user_query = args.get("query", "")
+                top_k = args.get("top_k", 5)
                 if not user_query:
                     return {"isError": True, "content": [{"type": "text", "text": "Query parameter is required."}]}
-                if self.agent:
+
+                if self.agent and hasattr(self.agent, "query"):
                     response_text = self.agent.query(user_query)
+                elif self.vector_store:
+                    results = self.vector_store.search_code_snippets(user_query, top_k=top_k)
+                    response_text = json.dumps(results, indent=2)
                 else:
-                    response_text = "RAG Agent unavailable."
+                    response_text = "Search engines unavailable."
+
                 return {"content": [{"type": "text", "text": response_text}]}
 
-            elif tool_name == "analyze_symbol_impact":
-                symbol = args.get("symbol", "")
+            elif tool_name in ("analyze_symbol_impact", "analyze_impact"):
+                symbol = args.get("symbol") or args.get("target_symbol", "")
                 if not symbol:
                     return {"isError": True, "content": [{"type": "text", "text": "Symbol parameter is required."}]}
+
                 if self.graph_store:
                     impact_data = self.graph_store.analyze_impact(symbol)
-                    formatted_json = json.dumps(impact_data, indent=2)
-                    return {"content": [{"type": "text", "text": f"Impact Analysis for '{symbol}':\n{formatted_json}"}]}
-                else:
-                    return {"isError": True, "content": [{"type": "text", "text": "Neo4j Graph Store not connected."}]}
+                    return {"content": [{"type": "text", "text": json.dumps(impact_data, indent=2)}]}
+                return {"isError": True, "content": [{"type": "text", "text": "Neo4j Graph Store not connected."}]}
 
             elif tool_name == "get_file_graph":
                 filepath = args.get("filepath", "")
                 if not filepath:
                     return {"isError": True, "content": [{"type": "text", "text": "Filepath parameter is required."}]}
+
                 if self.graph_store:
                     file_data = self.graph_store.get_file_graph(filepath)
-                    formatted_json = json.dumps(file_data, indent=2)
-                    return {"content": [{"type": "text", "text": f"Graph Structure for '{filepath}':\n{formatted_json}"}]}
-                else:
-                    return {"isError": True, "content": [{"type": "text", "text": "Neo4j Graph Store not connected."}]}
+                    return {"content": [{"type": "text", "text": json.dumps(file_data, indent=2)}]}
+                return {"isError": True, "content": [{"type": "text", "text": "Neo4j Graph Store not connected."}]}
 
             elif tool_name == "ingest_repository":
                 repo_url = args.get("repo_url", "")
                 if not repo_url:
                     return {"isError": True, "content": [{"type": "text", "text": "repo_url parameter is required."}]}
+
                 if not self.repo_ingestor:
                     return {"isError": True, "content": [{"type": "text", "text": "Repository Ingestor not initialized."}]}
 
@@ -177,8 +208,7 @@ class CodeGraphMCPServer:
                 else:
                     res = self.repo_ingestor.ingest_git_repo(repo_url)
 
-                formatted_json = json.dumps(res, indent=2)
-                return {"content": [{"type": "text", "text": f"Ingestion Result:\n{formatted_json}"}]}
+                return {"content": [{"type": "text", "text": f"Ingestion Result:\n{json.dumps(res, indent=2)}"}]}
 
             else:
                 return {"isError": True, "content": [{"type": "text", "text": f"Unknown tool: {tool_name}"}]}
@@ -187,75 +217,78 @@ class CodeGraphMCPServer:
             err_trace = traceback.format_exc()
             return {"isError": True, "content": [{"type": "text", "text": f"Error executing '{tool_name}': {e}\n{err_trace}"}]}
 
-    def send_response(self, response: Dict[str, Any]):
+    def send_response(self, response: Dict[str, Any]) -> None:
         """Writes JSON-RPC response strictly to real stdout."""
         msg = json.dumps(response)
         _real_stdout.write(msg + "\n")
         _real_stdout.flush()
 
-    def run(self):
+    def run(self) -> None:
         """Main stdio JSON-RPC processing loop."""
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                request = json.loads(line)
-            except json.JSONDecodeError:
-                sys.stderr.write(f"⚠️ Invalid JSON received: {line}\n")
-                continue
+        try:
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    request = json.loads(line)
+                except json.JSONDecodeError:
+                    self.log(f"⚠️ Invalid JSON received: {line}")
+                    continue
 
-            msg_id = request.get("id")
-            method = request.get("method")
+                msg_id = request.get("id")
+                method = request.get("method")
 
-            # 1. Standard MCP Handshake
-            if method == "initialize":
-                self.send_response({
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {"tools": {}},
-                        "serverInfo": {
-                            "name": "codegraph-rag-mcp",
-                            "version": "1.0.0"
-                        }
-                    }
-                })
-            elif method == "notifications/initialized":
-                pass  # Client notification confirmation
+                # 1. MCP Protocol Handshake
+                if method == "initialize":
+                    self.send_response({
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {
+                                "name": "codegraph-rag-mcp",
+                                "version": "1.0.0",
+                            },
+                        },
+                    })
+                elif method == "notifications/initialized":
+                    pass
+                elif method == "ping":
+                    self.send_response({"jsonrpc": "2.0", "id": msg_id, "result": {}})
 
-            # 2. List Available Tools
-            elif method == "tools/list":
-                self.send_response({
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": {
-                        "tools": self.get_tool_definitions()
-                    }
-                })
+                # 2. List Available Tools
+                elif method == "tools/list":
+                    self.send_response({
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {"tools": self.get_tool_definitions()},
+                    })
 
-            # 3. Call Tool Request
-            elif method == "tools/call":
-                params = request.get("params", {})
-                tool_name = params.get("name")
-                arguments = params.get("arguments", {})
-                result = self.handle_tool_call(tool_name, arguments)
-                self.send_response({
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": result
-                })
+                # 3. Call Tool Request
+                elif method == "tools/call":
+                    params = request.get("params", {})
+                    tool_name = params.get("name")
+                    arguments = params.get("arguments", {})
+                    result = self.handle_tool_call(tool_name, arguments)
+                    self.send_response({
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": result,
+                    })
 
-            elif msg_id is not None:
-                self.send_response({
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "error": {
-                        "code": -32601,
-                        "message": f"Method '{method}' not found."
-                    }
-                })
+                elif msg_id is not None:
+                    self.send_response({
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {
+                            "code": -32601,
+                            "message": f"Method '{method}' not found.",
+                        },
+                    })
+        except (KeyboardInterrupt, EOFError):
+            self.log("👋 Shutting down CodeGraph-RAG MCP Server.")
 
 
 if __name__ == "__main__":
