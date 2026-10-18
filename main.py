@@ -9,13 +9,24 @@ from modules.agent_workflow import CodeGraphAgent
 
 load_dotenv()
 
+SUPPORTED_EXTENSIONS = ["py", "java", "js", "jsx", "ts", "tsx", "cpp", "hpp", "c", "h", "go"]
+
+
 def ingest_codebase(vector_store: CodeVectorStore):
-    """Parses all Python modules and updates Neo4j and Qdrant."""
+    """Parses all polyglot modules and updates Neo4j and Qdrant with fresh vector embeddings."""
     print("🚀 Ingesting Codebase into Neo4j & Qdrant...\n")
 
-    module_files = glob.glob("modules/**/*.py", recursive=True)
+    try:
+        vector_store.reset_collection()
+    except Exception as e:
+        print(f"⚠️ Vector collection reset note: {e}\n")
+
+    module_files = []
+    for ext in SUPPORTED_EXTENSIONS:
+        module_files.extend(glob.glob(f"modules/**/*.{ext}", recursive=True))
+
     if not module_files:
-        print("❌ No python modules found in 'modules/' directory.")
+        print("❌ No matching polyglot source files found in 'modules/' directory.")
         return
 
     neo4j_uri = os.getenv("NEO4J_URI")
@@ -30,23 +41,27 @@ def ingest_codebase(vector_store: CodeVectorStore):
             print(f"⚠️ Warning: Neo4j connection failed: {e}")
 
     doc_id_counter = 1
+    total_indexed = 0
 
     for filepath in module_files:
         if "__init__.py" in filepath:
             continue
 
-        print(f"📦 Processing '{filepath}'...")
         parser = CodeASTParser(filepath)
         ast_data = parser.extract_structures()
 
-        # 1. Ingest into Neo4j Knowledge Graph
+        fn_count = len(ast_data.get("functions", []))
+        cls_count = len(ast_data.get("classes", []))
+        const_count = len(ast_data.get("constants", []))
+        calls_count = len(ast_data.get("calls", []))
+        print(f"📦 Processing '{filepath}' -> Extracted: {cls_count} classes, {fn_count} functions, {calls_count} call sites")
+
         if graph_store:
             try:
                 graph_store.ingest_ast(filepath, ast_data)
             except Exception as e:
                 print(f"   ❌ Graph Error: {e}")
 
-        # 2. Ingest Functions & Methods into Vector Store
         for fn in ast_data.get("functions", []):
             snippet_text = (
                 f"File: {filepath}\n"
@@ -54,30 +69,31 @@ def ingest_codebase(vector_store: CodeVectorStore):
                 f"Docstring: {fn.get('docstring', '')}\n"
                 f"Code:\n{fn.get('code', '')}"
             )
-            vector_store.upsert_code_snippet(
+            if vector_store.upsert_code_snippet(
                 doc_id=doc_id_counter,
                 code_snippet=snippet_text,
-                metadata={"file": filepath, "type": fn.get("type", "function"), "name": fn["name"]}
-            )
+                metadata={"file": filepath, "type": fn.get("type", "function"), "name": fn["name"]},
+            ):
+                total_indexed += 1
             doc_id_counter += 1
 
-        # 3. Ingest Classes into Vector Store
         for cls in ast_data.get("classes", []):
             method_names = [m["name"] if isinstance(m, dict) else str(m) for m in cls.get("methods", [])]
             snippet_text = (
                 f"File: {filepath}\n"
                 f"Class: {cls['name']}\n"
+                f"Extends: {', '.join(cls.get('extends', []))}\n"
                 f"Methods: {', '.join(method_names)}\n"
                 f"Docstring: {cls.get('docstring', '')}"
             )
-            vector_store.upsert_code_snippet(
+            if vector_store.upsert_code_snippet(
                 doc_id=doc_id_counter,
                 code_snippet=snippet_text,
-                metadata={"file": filepath, "type": "class", "name": cls["name"]}
-            )
+                metadata={"file": filepath, "type": "class", "name": cls["name"]},
+            ):
+                total_indexed += 1
             doc_id_counter += 1
 
-        # 4. Ingest Global Constants (e.g., FALLBACK_MODELS) into Vector Store
         for const in ast_data.get("constants", []):
             snippet_text = (
                 f"File: {filepath}\n"
@@ -85,22 +101,24 @@ def ingest_codebase(vector_store: CodeVectorStore):
                 f"Docstring: {const.get('docstring', '')}\n"
                 f"Code:\n{const.get('code', '')}"
             )
-            vector_store.upsert_code_snippet(
+            if vector_store.upsert_code_snippet(
                 doc_id=doc_id_counter,
                 code_snippet=snippet_text,
-                metadata={"file": filepath, "type": "constant", "name": const["name"]}
-            )
+                metadata={"file": filepath, "type": "constant", "name": const["name"]},
+            ):
+                total_indexed += 1
             doc_id_counter += 1
 
     if graph_store:
         graph_store.close()
 
-    print("\n🎉 Knowledge Graph & Vector Store successfully updated!\n")
+    print(f"\n🎉 Knowledge Graph & Vector Store successfully updated! (Total snippets indexed: {total_indexed})\n")
+
 
 def interactive_chat():
     vector_store = CodeVectorStore()
     ingest_codebase(vector_store)
-    
+
     agent = CodeGraphAgent(vector_store=vector_store)
     print("🤖 CodeGraph Agent initialized! Type 'exit' or 'quit' to stop.\n")
     print("=" * 60)
@@ -117,7 +135,7 @@ def interactive_chat():
 
             print("\n🔍 Analyzing codebase and querying graph + vector stores...")
             answer = agent.query(user_query)
-            
+
             print("\n💡 Agent Response:")
             print("-" * 60)
             print(answer)
@@ -127,6 +145,7 @@ def interactive_chat():
         print("\n\n👋 Session interrupted. Goodbye!")
     finally:
         agent.close()
+
 
 if __name__ == "__main__":
     interactive_chat()

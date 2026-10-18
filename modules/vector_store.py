@@ -1,57 +1,135 @@
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from google import genai
 
+CANDIDATE_EMBED_MODELS = [
+    "gemini-embedding-001",
+    "text-embedding-004",
+    "embedding-001",
+]
+
+
 class CodeVectorStore:
-    """Handles code embeddings and vector storage using Gemini & Qdrant."""
+    """Manages vector storage and code embeddings using Qdrant and Google Gemini."""
 
-    def __init__(self, collection_name: str = "code_chunks"):
+    def __init__(
+        self,
+        collection_name: str = "code_chunks",
+        qdrant_path: str = "./qdrant_data",
+    ):
         self.collection_name = collection_name
-        
-        # Initialize Gemini client for embeddings
+
         api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is missing.")
+
         self.ai_client = genai.Client(api_key=api_key)
+        self.qdrant = QdrantClient(path=qdrant_path)
+        self.client = self.qdrant
 
-        # Initialize Qdrant Client (Uses local disk storage inside Codespaces)
-        self.qdrant = QdrantClient(path="./qdrant_data")
+        self.embedding_model, self.vector_size = self._auto_detect_embedding_model()
+        print(f"🎯 Vector Store initialized with model '{self.embedding_model}' ({self.vector_size} dims)")
 
-        # Create Qdrant collection if it doesn't exist (3072 dimensions for gemini-embedding-001)
+        self._ensure_collection()
+
+    def _auto_detect_embedding_model(self) -> Tuple[str, int]:
+        """Probes candidate models to select an active embedding model and its vector size."""
+        for model_name in CANDIDATE_EMBED_MODELS:
+            try:
+                response = self.ai_client.models.embed_content(
+                    model=model_name,
+                    contents="probe",
+                )
+                vec = []
+                if hasattr(response, "embedding") and response.embedding:
+                    vec = response.embedding.values
+                elif hasattr(response, "embeddings") and response.embeddings:
+                    vec = response.embeddings[0].values
+
+                if vec and len(vec) > 0:
+                    return model_name, len(vec)
+            except Exception:
+                continue
+
+        return "gemini-embedding-001", 3072
+
+    def _ensure_collection(self):
+        """Creates the Qdrant collection if it does not already exist."""
         if not self.qdrant.collection_exists(self.collection_name):
             self.qdrant.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=VectorParams(size=3072, distance=Distance.COSINE),
+                vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
             )
 
-    def generate_embedding(self, text: str) -> List[float]:
-        """Generates a vector embedding for a given code snippet using Gemini."""
-        response = self.ai_client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=text,
+    def reset_collection(self):
+        """Safely wipes and recreates the Qdrant collection to clear stale vectors."""
+        if self.qdrant.collection_exists(self.collection_name):
+            self.qdrant.delete_collection(self.collection_name)
+        self.qdrant.create_collection(
+            collection_name=self.collection_name,
+            vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
         )
-        return response.embeddings[0].values
+        print(f"🧹 Cleaned stale vector embeddings in Qdrant collection '{self.collection_name}'.")
 
-    def upsert_code_snippet(self, doc_id: int, code_snippet: str, metadata: Dict[str, Any]):
+    def generate_embedding(self, text: str) -> List[float]:
+        """Generates a dense vector embedding for a given text snippet using Gemini."""
+        if not text or not text.strip():
+            return []
+
+        try:
+            response = self.ai_client.models.embed_content(
+                model=self.embedding_model,
+                contents=text,
+            )
+            if hasattr(response, "embedding") and response.embedding:
+                return response.embedding.values
+            elif hasattr(response, "embeddings") and response.embeddings:
+                return response.embeddings[0].values
+            return []
+        except Exception as e:
+            print(f"❌ Gemini Embedding Error ({self.embedding_model}): {e}")
+            return []
+
+    def upsert_code_snippet(self, doc_id: int, code_snippet: str, metadata: Dict[str, Any]) -> bool:
         """Embeds a code snippet and stores it in Qdrant."""
         vector = self.generate_embedding(code_snippet)
-        
-        point = PointStruct(
-            id=doc_id,
-            vector=vector,
-            payload={
-                "code": code_snippet,
-                **metadata
-            }
-        )
-        self.qdrant.upsert(collection_name=self.collection_name, points=[point])
+        if not vector:
+            print(f"   ⚠️ Skipping doc #{doc_id} ('{metadata.get('name', 'unnamed')}'): Embedding failed.")
+            return False
 
-    def search_similar_code(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
+        payload = {
+            "snippet": code_snippet,
+            "code": code_snippet,
+            **metadata,
+        }
+
+        try:
+            point = PointStruct(id=doc_id, vector=vector, payload=payload)
+            self.qdrant.upsert(collection_name=self.collection_name, points=[point])
+            return True
+        except Exception as e:
+            print(f"   ❌ Qdrant Upsert Error for doc #{doc_id}: {e}")
+            return False
+
+    def search_similar_code(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """Searches Qdrant for code snippets semantically similar to the query."""
         query_vector = self.generate_embedding(query)
-        response = self.qdrant.query_points(
-            collection_name=self.collection_name,
-            query=query_vector,
-            limit=limit,
-        )
-        return [point.payload for point in response.points]
+        if not query_vector:
+            return []
+
+        try:
+            response = self.qdrant.query_points(
+                collection_name=self.collection_name,
+                query=query_vector,
+                limit=limit,
+            )
+            return [point.payload for point in response.points]
+        except Exception as e:
+            print(f"❌ Qdrant Search Error: {e}")
+            return []
+
+    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Alias interface supporting callers expecting search(query, top_k)."""
+        return self.search_similar_code(query=query, limit=top_k)
