@@ -223,3 +223,7 @@ __marimo__/
 *.db
 *.sqlite
 *.sqlite3
+
+# Local Qdrant vector database store
+qdrant_data/
+*/qdrant_data/

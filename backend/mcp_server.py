@@ -2,6 +2,7 @@
 """
 Model Context Protocol (MCP) Server for CodeGraph-RAG.
 Implements JSON-RPC 2.0 over stdio to expose codebase intelligence to Cursor, Claude, and VS Code.
+All debug logs and print statements are redirected strictly to sys.stderr to guarantee stdio protocol safety.
 """
 
 import sys
@@ -14,7 +15,8 @@ from dotenv import load_dotenv
 # Load .env file automatically for standalone stdio processes
 load_dotenv()
 
-# Redirect stdout during module initialization to prevent stdout contamination
+# STDIOSAFETY: Save real stdout for JSON-RPC 2.0 transport only,
+# and permanently redirect standard sys.stdout to sys.stderr.
 _real_stdout = sys.stdout
 sys.stdout = sys.stderr
 
@@ -23,22 +25,20 @@ try:
     from backend.app.services.graph_store import Neo4jGraphStore
     from backend.app.services.repo_ingestor import RepositoryIngestor
     from backend.app.services.ast_parser import CodeASTParser
+    from backend.app.services.agent_workflow import CodeGraphAgent
 except ImportError:
     try:
         from app.services.vector_store import CodeVectorStore
         from app.services.graph_store import Neo4jGraphStore
         from app.services.repo_ingestor import RepositoryIngestor
         from app.services.ast_parser import CodeASTParser
+        from app.services.agent_workflow import CodeGraphAgent
     except ImportError:
-        try:
-            from modules.vector_store import CodeVectorStore
-            from modules.graph_store import Neo4jGraphStore
-            from modules.repo_ingestor import RepositoryIngestor
-            from modules.ast_parser import CodeASTParser
-        except ImportError:
-            CodeVectorStore, Neo4jGraphStore, RepositoryIngestor, CodeASTParser = None, None, None, None
-finally:
-    sys.stdout = _real_stdout
+        CodeVectorStore = None
+        Neo4jGraphStore = None
+        RepositoryIngestor = None
+        CodeASTParser = None
+        CodeGraphAgent = None
 
 
 class CodeGraphMCPServer:
@@ -49,6 +49,7 @@ class CodeGraphMCPServer:
         self.graph_store = None
         self.ast_parser = None
         self.repo_ingestor = None
+        self.agent = None
         self._init_backend()
 
     def log(self, message: str) -> None:
@@ -57,11 +58,14 @@ class CodeGraphMCPServer:
         sys.stderr.flush()
 
     def _init_backend(self):
-        """Initializes storage engines quietly."""
+        """Initializes storage engines quietly with all diagnostics directed to stderr."""
         self.log("🚀 Starting CodeGraph-RAG MCP Server...")
         try:
             if CodeVectorStore:
-                self.vector_store = CodeVectorStore()
+                try:
+                    self.vector_store = CodeVectorStore()
+                except Exception as vs_err:
+                    self.log(f"⚠️ VectorStore init notice: {vs_err}")
 
             if CodeASTParser:
                 self.ast_parser = CodeASTParser
@@ -82,11 +86,21 @@ class CodeGraphMCPServer:
                     self.graph_store = None
 
             if RepositoryIngestor:
-                self.repo_ingestor = RepositoryIngestor(
-                    vector_store=self.vector_store,
-                    graph_store=self.graph_store,
-                    ast_parser=self.ast_parser,
-                )
+                try:
+                    self.repo_ingestor = RepositoryIngestor(
+                        vector_store=self.vector_store,
+                        graph_store=self.graph_store,
+                        ast_parser=self.ast_parser,
+                    )
+                except Exception as ing_err:
+                    self.log(f"⚠️ RepositoryIngestor init notice: {ing_err}")
+
+            if CodeGraphAgent and os.getenv("GEMINI_API_KEY"):
+                try:
+                    self.agent = CodeGraphAgent(vector_store=self.vector_store)
+                except Exception as agent_err:
+                    self.log(f"⚠️ CodeGraphAgent init notice: {agent_err}")
+
             self.log("✅ CodeGraph-RAG MCP Server initialized successfully!")
         except Exception as e:
             self.log(f"⚠️ Warning during MCP initialization: {e}")
@@ -166,7 +180,9 @@ class CodeGraphMCPServer:
                 if not user_query:
                     return {"isError": True, "content": [{"type": "text", "text": "Query parameter is required."}]}
 
-                if self.vector_store:
+                if self.agent:
+                    response_text = self.agent.query(user_query)
+                elif self.vector_store:
                     results = self.vector_store.search(user_query, top_k=top_k)
                     response_text = json.dumps(results, indent=2)
                 else:
@@ -247,7 +263,7 @@ class CodeGraphMCPServer:
                             "capabilities": {"tools": {}},
                             "serverInfo": {
                                 "name": "codegraph-rag-mcp",
-                                "version": "1.0.0",
+                                "version": "2.0.0",
                             },
                         },
                     })

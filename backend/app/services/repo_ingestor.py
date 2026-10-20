@@ -7,29 +7,9 @@ import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-try:
-    from backend.app.services.vector_store import CodeVectorStore
-except ImportError:
-    try:
-        from modules.vector_store import CodeVectorStore
-    except ImportError:
-        CodeVectorStore = None
-
-try:
-    from backend.app.services.graph_store import Neo4jGraphStore
-except ImportError:
-    try:
-        from modules.graph_store import Neo4jGraphStore
-    except ImportError:
-        Neo4jGraphStore = None
-
-try:
-    from backend.app.services.ast_parser import CodeASTParser
-except ImportError:
-    try:
-        from modules.ast_parser import CodeASTParser
-    except ImportError:
-        CodeASTParser = None
+from backend.app.services.vector_store import CodeVectorStore
+from backend.app.services.graph_store import Neo4jGraphStore
+from backend.app.services.ast_parser import CodeASTParser
 
 # Default directory & file patterns to ignore during ingestion
 DEFAULT_IGNORE_PATTERNS = {

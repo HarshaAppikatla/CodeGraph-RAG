@@ -1,11 +1,12 @@
 import os
+import sys
 import re
 import time
 from typing import Optional, List, Dict, Any
 from google import genai
 from google.genai.errors import ServerError, ClientError, APIError
-from modules.vector_store import CodeVectorStore
-from modules.graph_store import Neo4jGraphStore
+from backend.app.services.vector_store import CodeVectorStore
+from backend.app.services.graph_store import Neo4jGraphStore
 
 PREFERRED_TEXT_MODELS = [
     "gemini-2.5-flash",
@@ -13,6 +14,7 @@ PREFERRED_TEXT_MODELS = [
     "gemini-1.5-flash",
     "gemini-1.5-pro",
 ]
+FALLBACK_MODELS = PREFERRED_TEXT_MODELS
 
 EXCLUDED_MODEL_KEYWORDS = [
     "tts", "audio", "embed", "imagen", "vision", "lyria",
@@ -38,8 +40,8 @@ class CodeGraphAgent:
 
         self.chat_history: List[Dict[str, str]] = []
 
-        neo4j_uri = os.getenv("NEO4J_URI")
-        neo4j_user = os.getenv("NEO4J_USERNAME", "neo4j")
+        neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+        neo4j_user = os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "neo4j"))
         neo4j_pass = os.getenv("NEO4J_PASSWORD")
         self.graph_store = None
 
@@ -47,7 +49,12 @@ class CodeGraphAgent:
             try:
                 self.graph_store = Neo4jGraphStore(neo4j_uri, neo4j_user, neo4j_pass)
             except Exception as e:
-                print(f"⚠️ Warning: Failed to connect to Neo4j Graph Store: {e}")
+                self.log(f"⚠️ Warning: Failed to connect to Neo4j Graph Store: {e}")
+
+    def log(self, message: str) -> None:
+        """Logs strictly to sys.stderr to avoid stdio protocol corruption."""
+        sys.stderr.write(f"{message}\n")
+        sys.stderr.flush()
 
     def _discover_models(self) -> List[str]:
         """Queries GenAI API at startup and filters out non-text or preview experimental models."""
@@ -65,7 +72,7 @@ class CodeGraphAgent:
                     if not any(ex in name_lower for ex in EXCLUDED_MODEL_KEYWORDS):
                         discovered.append(name)
         except Exception as e:
-            print(f"⚠️ Model discovery note: {e}")
+            self.log(f"⚠️ Model discovery note: {e}")
 
         combined = []
         for pref in PREFERRED_TEXT_MODELS:
@@ -76,7 +83,7 @@ class CodeGraphAgent:
             if d not in combined:
                 combined.append(d)
 
-        print(f"🔍 Initialized models for API Key: {combined[:4]}")
+        self.log(f"🔍 Initialized models for API Key: {combined[:4]}")
         return combined if combined else PREFERRED_TEXT_MODELS
 
     def _append_chat_history(self, user: str, agent: str):
@@ -186,12 +193,12 @@ INSTRUCTIONS:
                     error_msg = str(e)
 
                     if "503" in error_msg or "UNAVAILABLE" in error_msg:
-                        print(f"⚠️ Model '{model}' server busy (503). Retrying attempt {attempt+1}/3 in 2s...")
+                        self.log(f"⚠️ Model '{model}' server busy (503). Retrying attempt {attempt+1}/3 in 2s...")
                         time.sleep(2)
                         continue
 
                     elif "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                        print(f"⚠️ Quota exhausted for model '{model}'. Waiting 3s before switching...")
+                        self.log(f"⚠️ Quota exhausted for model '{model}'. Waiting 3s before switching...")
                         time.sleep(3)
                         break
 
@@ -201,7 +208,7 @@ INSTRUCTIONS:
                     elif attempt < 2:
                         time.sleep(2)
                     else:
-                        print(f"⚠️ Model '{model}' failed ({e}). Switching...")
+                        self.log(f"⚠️ Model '{model}' failed ({e}). Switching...")
 
         return "⚠️ All configured Gemini models are currently experiencing high demand or rate limits. Please try again in a few moments."
 

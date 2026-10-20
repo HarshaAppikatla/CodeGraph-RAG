@@ -3,8 +3,8 @@ import time
 from typing import List, Dict, Any
 from google import genai
 from google.genai.errors import ServerError, ClientError, APIError
-from modules.agent_workflow import CodeGraphAgent, FALLBACK_MODELS
-from modules.vector_store import CodeVectorStore
+from backend.app.services.agent_workflow import CodeGraphAgent, FALLBACK_MODELS
+from backend.app.services.vector_store import CodeVectorStore
 
 class RAGEvaluator:
     """Evaluates CodeGraph-RAG outputs for Faithfulness and Relevancy using Gemini."""
@@ -49,10 +49,8 @@ Provide concise evaluation scores (1-5 for Faithfulness, 1-5 for Relevancy) and 
                 err_msg = str(e)
                 if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
                     time.sleep(2)
-                continue
-
-        if not eval_result_text:
-            eval_result_text = "⚠️ Evaluation failed: All fallback models were unavailable or hit quota limits."
+                    continue
+                break
 
         return {
             "query": query,
@@ -70,7 +68,7 @@ if __name__ == "__main__":
     evaluator = RAGEvaluator(agent)
 
     benchmark_queries = [
-        "What classes and methods are defined in modules/ast_parser.py?",
+        "What classes and methods are defined in backend/app/services/ast_parser.py?",
         "How does Neo4jGraphStore structure relationships between files and functions?",
         "Explain the step-by-step workflow of how CodeGraphAgent handles a user query."
     ]

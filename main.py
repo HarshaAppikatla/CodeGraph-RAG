@@ -2,10 +2,10 @@ import os
 import glob
 import sys
 from dotenv import load_dotenv
-from modules.ast_parser import CodeASTParser
-from modules.graph_store import Neo4jGraphStore
-from modules.vector_store import CodeVectorStore
-from modules.agent_workflow import CodeGraphAgent
+from backend.app.services.ast_parser import CodeASTParser
+from backend.app.services.graph_store import Neo4jGraphStore
+from backend.app.services.vector_store import CodeVectorStore
+from backend.app.services.agent_workflow import CodeGraphAgent
 
 load_dotenv()
 
@@ -23,14 +23,14 @@ def ingest_codebase(vector_store: CodeVectorStore):
 
     module_files = []
     for ext in SUPPORTED_EXTENSIONS:
-        module_files.extend(glob.glob(f"modules/**/*.{ext}", recursive=True))
+        module_files.extend(glob.glob(f"backend/app/**/*.{ext}", recursive=True))
 
     if not module_files:
-        print("❌ No matching polyglot source files found in 'modules/' directory.")
+        print("❌ No matching polyglot source files found in 'backend/app/' directory.")
         return
 
-    neo4j_uri = os.getenv("NEO4J_URI")
-    neo4j_user = os.getenv("NEO4J_USERNAME", "neo4j")
+    neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    neo4j_user = os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "neo4j"))
     neo4j_pass = os.getenv("NEO4J_PASSWORD")
 
     graph_store = None

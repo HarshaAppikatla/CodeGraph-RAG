@@ -30,7 +30,11 @@ class Neo4jGraphStore:
     def _connect(self) -> None:
         """Establishes Neo4j connection and bootstraps constraints."""
         try:
-            self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+            self.driver = GraphDatabase.driver(
+                self.uri,
+                auth=(self.user, self.password),
+                connection_timeout=2.0
+            )
             self.driver.verify_connectivity()
             self.log("✅ Connected to Neo4j Graph Database.")
             self._bootstrap_schema()
