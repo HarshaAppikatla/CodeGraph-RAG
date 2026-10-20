@@ -83,47 +83,7 @@ Standard Code RAG systems rely strictly on naive chunked vector embeddings. When
 
 ## 🏗️ System Architecture
 
-### Architectural Overview
-
-```text
-                            ┌──────────────────────────────────────────────┐
-                            │    Developer / Web UI / Cursor / VS Code     │
-                            └──────────────────────┬───────────────────────┘
-                                                   │
-                  ┌────────────────────────────────┴────────────────────────────────┐
-                  ▼                                                                 ▼
-      [ React 18 SPA Dashboard ]                                      [ FastMCP Stdio Server ]
-       (Port 5173 - Tailwind CSS)                                       (JSON-RPC 2.0 Engine)
-                  │                                                                 │
-                  │ REST API (Bearer JWT)                                           │ Direct Service Calls
-                  ▼                                                                 │
-      ┌─────────────────────────────────────────────────────────┐                   │
-      │                  FastAPI Backend Server                 │                   │
-      │                      (Port 8000)                        │                   │
-      ├─────────────────────────────────────────────────────────┤                   │
-      │  • /api/auth/*       : Session & JWT Provider           │                   │
-      │  • /api/workspace/*  : Git Ingestion & AST Pipeline     │◄──────────────────┘
-      │  • /api/rag/impact   : N-Hop Blast Radius Traversal     │
-      │  • /api/rag/query    : Dual-Stream Context Fusion       │
-      │  • /api/rag/refactor : Automated Patch & Diff Synthesis │
-      └────────────────────────────┬────────────────────────────┘
-                                   │
-                ┌──────────────────┴──────────────────┐
-                ▼                                     ▼
-     [ Polyglot AST Parser ]              [ Dual-Stream Knowledge Layer ]
-   (Tree-sitter Scope Resolution)             ┌───────────────┴───────────────┐
-   Python, Java, TS, C++, Go                  ▼                               ▼
-                                   [ Qdrant Vector Store ]        [ Neo4j Knowledge Graph ]
-                                    (384D BGE Embeddings)          (Property Graph & Call Nodes)
-                                   Semantic Chunk Retrieval       Multi-Hop Blast Radius Traversal
-                                              │                               │
-                                              └───────────────┬───────────────┘
-                                                              ▼
-                                               [ Gemini Reasoning Engine ]
-                                               (Multi-Tier Failover Mesh)
-```
-
-### End-to-End Ingestion & Retrieval Pipeline
+### End-to-End Architectural Pipeline
 
 ```mermaid
 flowchart TD
@@ -173,6 +133,50 @@ flowchart TD
     style DualRetrieval fill:#f0fdf4,stroke:#22c55e,stroke-width:2px
     style Reasoning fill:#fdf4ff,stroke:#d946ef,stroke-width:2px
 ```
+
+<details>
+<summary><b>📐 Text-Based ASCII Architecture View (Click to expand)</b></summary>
+<br/>
+
+```text
+                      ┌─────────────────────────────────┐
+                      │ Developer / Web / Cursor / IDE  │
+                      └────────────────┬────────────────┘
+                                       │
+            ┌──────────────────────────┴──────────────────────────┐
+            ▼                                                     ▼
+  [ React 18 SPA Dashboard ]                           [ FastMCP Stdio Server ]
+   (Port 5173 - Tailwind)                               (JSON-RPC 2.0 Engine)
+            │                                                     │
+            │ REST API (Bearer JWT)                               │ Service Calls
+            ▼                                                     │
+  ┌─────────────────────────────────────────────────────┐         │
+  │               FastAPI Backend Server                │         │
+  │                     (Port 8000)                     │         │
+  ├─────────────────────────────────────────────────────┤         │
+  │ • /api/auth/*       : Session & JWT Provider        │         │
+  │ • /api/workspace/*  : Git Ingestion & AST Pipeline  │◄────────┘
+  │ • /api/rag/impact   : N-Hop Blast Radius Traversal  │
+  │ • /api/rag/query    : Dual-Stream Context Fusion    │
+  │ • /api/rag/refactor : Automated Patch Synthesizer   │
+  └──────────────────────────┬──────────────────────────┘
+                             │
+            ┌────────────────┴────────────────┐
+            ▼                                 ▼
+ [ Polyglot AST Parser ]          [ Dual-Stream Knowledge Layer ]
+  Tree-sitter Scope Engine            ┌───────────────┴───────────────┐
+  Python, TS, Go, Java, C++           ▼                               ▼
+                             [ Qdrant Vector DB ]         [ Neo4j Graph DB ]
+                             (384D BGE Vectors)           (Property Graph)
+                             Semantic Search              Multi-Hop Blast Radius
+                                      │                               │
+                                      └───────────────┬───────────────┘
+                                                      ▼
+                                           [ Gemini Reasoning Mesh ]
+                                           (Automatic Model Failover)
+```
+
+</details>
 
 ---
 
