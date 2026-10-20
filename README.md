@@ -13,10 +13,11 @@
 [![Tree--Sitter](https://img.shields.io/badge/Tree--Sitter-Polyglot_AST-1B1F23?style=for-the-badge&logo=tree-sitter&logoColor=white)](https://tree-sitter.github.io/)
 [![Neo4j](https://img.shields.io/badge/Neo4j-AuraDB%20%7C%20Graph-008CC1?style=for-the-badge&logo=neo4j&logoColor=white)](https://neo4j.com/)
 [![Qdrant](https://img.shields.io/badge/Qdrant-Vector_DB-DC2626?style=for-the-badge&logo=qdrant&logoColor=white)](https://qdrant.tech/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Google Gemini](https://img.shields.io/badge/Google_Gemini-2.5%20%7C%203.8-8E75C2?style=for-the-badge&logo=google-gemini&logoColor=white)](https://ai.google.dev/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-Protocol_JSON--RPC-blueviolet?style=for-the-badge&logo=anthropic&logoColor=white)](https://modelcontextprotocol.io/)
 [![Docker](https://img.shields.io/badge/Docker-Compose_Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](./LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)](https://github.com/HarshaAppikatla/CodeGraph-RAG/pulls)
 
 <br/>
@@ -24,11 +25,13 @@
 [Key Features](#-key-features) •
 [The Core Problem](#-the-core-problem-solved) •
 [System Architecture](#️-system-architecture) •
+[Visual Preview](#️-dashboard--blast-radius-preview) •
 [Tech Stack](#️-complete-tech-stack-matrix) •
 [MCP Tools](#-exposed-mcp-tools) •
 [Monorepo Structure](#-monorepo-directory-structure) •
 [Quickstart](#-quickstart--setup) •
-[Benchmarks](#-system-performance-benchmark)
+[Benchmarks](#-system-performance-benchmark) •
+[Troubleshooting](#️-common-troubleshooting)
 
 <br/>
 
@@ -107,6 +110,16 @@ Standard Code RAG systems rely strictly on naive chunked vector embeddings. When
                [VS Code / Cursor]            [Claude Desktop]            [Web SaaS Dashboard]
             Native MCP IDE Client         Autonomous AI Agent         Blast-Radius Command Center
 ```
+
+---
+
+## 🖼️ Dashboard & Blast-Radius Preview
+
+| Graph Dependency Visualizer | Blast-Radius Impact Analysis |
+| :---: | :---: |
+| ![Graph Preview](docs/assets/graph_preview.png) | ![Impact Preview](docs/assets/impact_preview.png) |
+
+---
 
 ### Ingestion & Retrieval Pipeline
 
@@ -339,7 +352,7 @@ Add CodeGraph-RAG to `.vscode/mcp.json` or your Cursor MCP settings (`~/.cursor/
       "type": "stdio",
       "command": "python",
       "args": [
-        "mcp_server.py"
+        "backend/mcp_server.py"
       ],
       "env": {
         "GEMINI_API_KEY": "your_gemini_api_key",
@@ -361,7 +374,7 @@ Add to `claude_desktop_config.json`:
     "codegraph-rag": {
       "command": "python",
       "args": [
-        "E:/CodeRag/mcp_server.py"
+        "/path/to/CodeGraph-RAG/backend/mcp_server.py"
       ],
       "env": {
         "GEMINI_API_KEY": "your_gemini_api_key",
@@ -392,6 +405,14 @@ Evaluated across production multi-module repositories (including **Study-Sync**,
 
 ---
 
+## 🛠️ Common Troubleshooting
+
+* **Neo4j Connection Timeout**: Verify your URI uses `neo4j+s://` for Neo4j AuraDB or `bolt://localhost:7687` for local Docker containers.
+* **Tree-sitter Parsing Error**: Ensure C compiler toolchains (`gcc` / `clang` / MSVC) are installed if building tree-sitter language bindings from source.
+* **MCP Stdio Logs**: MCP servers communicate over `stdout`. Ensure all debug print statements in Python modules output to `sys.stderr` to prevent JSON-RPC parsing failures.
+
+---
+
 ## 🗺️ Roadmap
 
 - [x] Tree-sitter Scope-Resolved AST Extraction
@@ -417,7 +438,7 @@ Contributions are welcome! Please follow these steps:
 
 ## 📝 License
 
-Distributed under the **MIT License**. See [`LICENSE`](file:///e:/CodeRag/LICENSE) for more information.
+Distributed under the **MIT License**. See [`LICENSE`](./LICENSE) for more information.
 
 ---
 
