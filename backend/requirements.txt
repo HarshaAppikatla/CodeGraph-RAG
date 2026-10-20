@@ -1,0 +1,16 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+sqlalchemy>=2.0.28
+psycopg2-binary>=2.9.9
+neo4j>=5.18.0
+qdrant-client>=1.8.0
+sentence-transformers>=2.5.0
+google-genai>=0.1.0
+tree-sitter>=0.21.0
+gitpython>=3.1.42
+python-multipart>=0.0.9
+pyjwt>=2.8.0
+passlib[bcrypt]>=1.7.4
+python-dotenv>=1.0.0
