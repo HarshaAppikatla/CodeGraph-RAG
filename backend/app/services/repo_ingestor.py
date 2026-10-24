@@ -2,6 +2,7 @@ import os
 import sys
 import shutil
 import tempfile
+import uuid
 import zipfile
 import subprocess
 from pathlib import Path
@@ -100,7 +101,9 @@ class RepositoryIngestor:
                 valid_files.append(path)
         return valid_files
 
-    def ingest_git_repo(self, repo_url: str, branch: Optional[str] = None) -> Dict[str, Any]:
+    def ingest_git_repo(
+        self, repo_url: str, branch: Optional[str] = None, workspace_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Clones a remote Git repository into a temporary directory and indexes it."""
         self.log(f"📥 Cloning remote Git repository: {repo_url}")
         temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
@@ -117,7 +120,7 @@ class RepositoryIngestor:
             )
             source_files = self.collect_source_files(temp_dir)
             self.log(f"✅ Found {len(source_files)} source files for indexing.")
-            indexing_summary = self._index_files(temp_dir, source_files)
+            indexing_summary = self._index_files(temp_dir, source_files, workspace_id)
             return {
                 "status": "success",
                 "source": repo_url,
@@ -131,7 +134,7 @@ class RepositoryIngestor:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def ingest_zip_archive(self, zip_path: str) -> Dict[str, Any]:
+    def ingest_zip_archive(self, zip_path: str, workspace_id: Optional[str] = None) -> Dict[str, Any]:
         """Extracts a local ZIP archive safely into a temporary directory and indexes it."""
         if not os.path.exists(zip_path):
             return {"status": "error", "message": f"ZIP file not found at: {zip_path}"}
@@ -147,7 +150,7 @@ class RepositoryIngestor:
                 zip_ref.extractall(temp_dir)
             source_files = self.collect_source_files(temp_dir)
             self.log(f"✅ Found {len(source_files)} source files for indexing.")
-            indexing_summary = self._index_files(temp_dir, source_files)
+            indexing_summary = self._index_files(temp_dir, source_files, workspace_id)
             return {
                 "status": "success",
                 "source": zip_path,
@@ -161,8 +164,11 @@ class RepositoryIngestor:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def _index_files(self, base_dir: str, files: List[Path]) -> Dict[str, int]:
+    def _index_files(
+        self, base_dir: str, files: List[Path], workspace_id: Optional[str] = None
+    ) -> Dict[str, int]:
         """Processes source files through vector store and graph store pipelines."""
+        ws = workspace_id or "global"
         indexed_vectors = 0
         indexed_graph_nodes = 0
         indexed_graph_edges = 0
@@ -181,11 +187,13 @@ class RepositoryIngestor:
                     "filepath": rel_path,
                     "filename": file_path.name,
                     "extension": file_path.suffix,
+                    "workspace_id": ws,
                 }
 
                 if self.vector_store:
                     batch_vector_items.append({
-                        "doc_id": idx,
+                        # Deterministic per (workspace, file): repos no longer overwrite each other
+                        "doc_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{ws}:{rel_path}")),
                         "code_snippet": content,
                         "metadata": metadata,
                     })
@@ -204,7 +212,7 @@ class RepositoryIngestor:
 
                         if ast_data:
                             if hasattr(self.graph_store, "ingest_ast"):
-                                self.graph_store.ingest_ast(rel_path, ast_data)
+                                self.graph_store.ingest_ast(rel_path, ast_data, workspace_id=ws)
 
                             nodes_count = (
                                 len(ast_data.get("classes", []))

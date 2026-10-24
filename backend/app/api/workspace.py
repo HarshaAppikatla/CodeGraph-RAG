@@ -11,6 +11,7 @@ from backend.app.models.workspace import Workspace
 from backend.app.models.user import User
 from backend.app.api.auth import get_current_user_optional
 from backend.app.services.repo_ingestor import RepositoryIngestor
+from backend.app.services.registry import get_vector_store, get_graph_store
 
 router = APIRouter(prefix="/workspace", tags=["Workspaces"])
 
@@ -65,6 +66,11 @@ DEMO_WORKSPACES = [
 ]
 
 
+def _make_ingestor() -> RepositoryIngestor:
+    """Ingestor wired to the shared stores (Qdrant local mode allows only one client)."""
+    return RepositoryIngestor(vector_store=get_vector_store(), graph_store=get_graph_store())
+
+
 def _run_background_git_ingestion(workspace_id: str, repo_url: str, branch: str):
     """Background task running actual AST parsing, vector embedding, and graph ingestion."""
     db: Session = SessionLocal()
@@ -72,8 +78,8 @@ def _run_background_git_ingestion(workspace_id: str, repo_url: str, branch: str)
         ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
         if not ws:
             return
-        ingestor = RepositoryIngestor()
-        res = ingestor.ingest_git_repo(repo_url, branch=branch)
+        ingestor = _make_ingestor()
+        res = ingestor.ingest_git_repo(repo_url, branch=branch, workspace_id=workspace_id)
         if res.get("status") == "success":
             summary = res.get("indexing_summary", {})
             ws.status = "READY"
@@ -99,8 +105,8 @@ def _run_background_zip_ingestion(workspace_id: str, temp_zip_path: str):
         ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
         if not ws:
             return
-        ingestor = RepositoryIngestor()
-        res = ingestor.ingest_zip_archive(temp_zip_path)
+        ingestor = _make_ingestor()
+        res = ingestor.ingest_zip_archive(temp_zip_path, workspace_id=workspace_id)
         if res.get("status") == "success":
             summary = res.get("indexing_summary", {})
             ws.status = "READY"
@@ -205,8 +211,13 @@ async def ingest_workspace(
 
         background_tasks.add_task(_run_background_git_ingestion, ws.id, repo_url, branch or "main")
 
-    else:
-        # ZIP upload handling
+    elif upload_type == "zip":
+        # ZIP upload handling (multipart form with a 'file' field)
+        if not (file and hasattr(file, "file")):
+            raise HTTPException(
+                status_code=400,
+                detail="A .zip file upload (multipart form field 'file') is required for type 'zip'.",
+            )
         ws_name = (getattr(file, "filename", None) or "uploaded-project").replace(".zip", "")
         temp_zip = None
         if file and hasattr(file, "file"):
@@ -229,11 +240,13 @@ async def ingest_workspace(
         db.commit()
         db.refresh(ws)
 
-        if temp_zip:
-            background_tasks.add_task(_run_background_zip_ingestion, ws.id, temp_zip)
-        else:
-            ws.status = "READY"
-            db.commit()
+        background_tasks.add_task(_run_background_zip_ingestion, ws.id, temp_zip)
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported ingestion type '{upload_type}'. Use 'git' or 'zip'.",
+        )
 
     return WorkspaceResponse(
         id=ws.id,

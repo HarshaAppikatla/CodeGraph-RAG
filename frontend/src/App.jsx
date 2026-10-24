@@ -145,6 +145,10 @@ export default function App() {
   const [uploadType, setUploadType] = useState('git');
   const [gitRepoInput, setGitRepoInput] = useState('https://github.com/HarshaAppikatla/Study-Sync');
   const [zipFileName, setZipFileName] = useState('');
+  const [zipFile, setZipFile] = useState(null);
+  const [authError, setAuthError] = useState('');
+  const [uploadError, setUploadError] = useState('');
+  const ingestTimers = useRef([]);
   const [branchInput, setBranchInput] = useState('main');
 
   // Ingestion Progress State
@@ -251,6 +255,7 @@ export default function App() {
   }, [selectedSymbolKey, selectedWorkspace, currentScreen]);
 
   const handleLoginDemoAccount = async () => {
+    setAuthError('');
     try {
       const res = await api.loginDemo();
       setCurrentUser(res.user);
@@ -270,44 +275,20 @@ export default function App() {
 
       setCurrentScreen('WORKSPACE_SELECT');
     } catch (err) {
-      console.warn("Demo login API failed, using local demo fallback:", err);
-      const demoUser = {
-        id: 'usr-demo-777',
-        name: 'Harsha Vardhan (Demo Dev)',
-        email: 'harsha.demo@codegraph.ai',
-        role: 'Lead Architect',
-        isDemo: true
-      };
-      setCurrentUser(demoUser);
-      setAuthEmail('harsha.demo@codegraph.ai');
-      setAuthPassword('demopassword2026');
-      setCurrentScreen('WORKSPACE_SELECT');
+      setAuthError(err.message);
     }
   };
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
     if (!authEmail) return;
+    setAuthError('');
 
     try {
-      let res;
-      if (authMode === 'LOGIN') {
-        res = await api.login(authEmail, authPassword);
-      } else {
-        res = await api.register(authEmail, authPassword);
-      }
-
-      if (res && res.user) {
-        setCurrentUser(res.user);
-      } else {
-        setCurrentUser({
-          id: 'usr-' + Date.now(),
-          name: authEmail.split('@')[0] || 'Developer',
-          email: authEmail,
-          role: 'Software Engineer',
-          isDemo: false
-        });
-      }
+      const res = authMode === 'LOGIN'
+        ? await api.login(authEmail, authPassword)
+        : await api.register(authEmail, authPassword);
+      setCurrentUser(res.user);
 
       try {
         const wsList = await api.listWorkspaces();
@@ -321,15 +302,7 @@ export default function App() {
 
       setCurrentScreen('WORKSPACE_SELECT');
     } catch (err) {
-      console.warn("Auth API error, using fallback session:", err);
-      setCurrentUser({
-        id: 'usr-' + Date.now(),
-        name: authEmail.split('@')[0] || 'Developer',
-        email: authEmail,
-        role: 'Software Engineer',
-        isDemo: false
-      });
-      setCurrentScreen('WORKSPACE_SELECT');
+      setAuthError(err.message);
     }
   };
 
@@ -340,22 +313,33 @@ export default function App() {
   };
 
   const handleStartIngestion = async () => {
+    setUploadError('');
+    if (uploadType === 'zip' && !zipFile) {
+      setUploadError('Choose a .zip file first.');
+      return;
+    }
+
     setCurrentScreen('INGESTION');
     setIngestProgress(0);
     setIngestLogs([]);
+    ingestTimers.current.forEach(clearTimeout);
+    ingestTimers.current = [];
 
     // Trigger backend ingestion
-    api.ingestWorkspace({
-      repo_url: uploadType === 'git' ? gitRepoInput : (zipFileName || 'archive.zip'),
-      type: uploadType,
-      branch: branchInput
-    }).then(newWs => {
+    const payload = uploadType === 'zip'
+      ? { type: 'zip', file: zipFile }
+      : { repo_url: gitRepoInput, type: 'git', branch: branchInput };
+
+    api.ingestWorkspace(payload).then(newWs => {
       if (newWs && newWs.id) {
         setWorkspaces(prev => [newWs, ...prev]);
         setSelectedWorkspace(newWs);
       }
     }).catch(err => {
-      console.warn("Backend ingestion API warning:", err);
+      ingestTimers.current.forEach(clearTimeout);
+      ingestTimers.current = [];
+      setUploadError(err.message);
+      setCurrentScreen('WORKSPACE_SELECT');
     });
 
     const steps = [
@@ -367,17 +351,18 @@ export default function App() {
     ];
 
     steps.forEach((step, idx) => {
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         setIngestProgress(step.p);
         setIngestStageText(step.text);
         setIngestLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${step.text}`]);
 
         if (step.p === 100) {
-          setTimeout(() => {
+          ingestTimers.current.push(setTimeout(() => {
             setCurrentScreen('APP_WORKSPACE');
-          }, 800);
+          }, 800));
         }
       }, (idx + 1) * 800);
+      ingestTimers.current.push(timer);
     });
   };
 
@@ -392,7 +377,7 @@ export default function App() {
     setIsAiThinking(true);
 
     try {
-      const res = await api.queryRag(selectedWorkspace?.id || 'ws-study-sync', currentQuery);
+      const res = await api.queryRag(selectedWorkspace?.id || 'ws-study-sync', currentQuery, geminiApiKey);
       setIsAiThinking(false);
       if (res && res.answer) {
         setQaMessages(prev => [
@@ -425,7 +410,7 @@ export default function App() {
     setIsGeneratingDiff(true);
 
     try {
-      const res = await api.generateRefactor(selectedWorkspace?.id || 'ws-study-sync', refactorPrompt);
+      const res = await api.generateRefactor(selectedWorkspace?.id || 'ws-study-sync', refactorPrompt, geminiApiKey);
       if (res && res.diffs) {
         setIsGeneratingDiff(false);
         setGeneratedDiff(res);
@@ -537,6 +522,12 @@ export default function App() {
       {currentScreen === 'AUTH' && (
         <div className="flex-1 flex flex-col justify-between bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-slate-950 relative overflow-hidden">
           <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[300px] bg-cyan-500/10 blur-[120px] rounded-full pointer-events-none"></div>
+
+          {authError && (
+            <div role="alert" className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-md px-4 py-2.5 bg-red-950/90 border border-red-500/40 text-red-200 text-xs font-medium rounded-xl shadow-xl">
+              {authError}
+            </div>
+          )}
 
           <div className="p-6 max-w-7xl w-full mx-auto flex items-center justify-between relative z-10">
             <div className="flex items-center space-x-3">
@@ -843,13 +834,23 @@ export default function App() {
                 <input
                   type="file"
                   accept=".zip"
-                  onChange={(e) => setZipFileName(e.target.files[0]?.name || '')}
+                  onChange={(e) => {
+                    const f = e.target.files[0] || null;
+                    setZipFile(f);
+                    setZipFileName(f ? f.name : '');
+                  }}
                   className="hidden"
                   id="zip-input"
                 />
                 <label htmlFor="zip-input" className="inline-block px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl cursor-pointer">
                   Browse File
                 </label>
+              </div>
+            )}
+
+            {uploadError && (
+              <div role="alert" className="px-4 py-2.5 bg-red-950/60 border border-red-500/40 text-red-200 text-xs rounded-xl">
+                {uploadError}
               </div>
             )}
 

@@ -3,7 +3,7 @@ import sys
 import atexit
 from typing import List, Dict, Any, Tuple, Optional
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 from sentence_transformers import SentenceTransformer
 from backend.app.config import settings
 
@@ -172,17 +172,29 @@ class CodeVectorStore:
             self.log(f"⚠️ Qdrant Batch Upsert Notice: {e}")
             return 0
 
-    def search_similar_code(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Searches Qdrant for code snippets semantically similar to the query."""
+    def search_similar_code(
+        self, query: str, limit: int = 5, workspace_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Searches Qdrant for code snippets semantically similar to the query.
+
+        When workspace_id is given, only chunks indexed for that workspace are returned.
+        """
         query_vector = self.generate_embedding(query)
         if not query_vector:
             return []
+
+        query_filter = None
+        if workspace_id:
+            query_filter = Filter(
+                must=[FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id))]
+            )
 
         try:
             if hasattr(self.qdrant, "query_points"):
                 response = self.qdrant.query_points(
                     collection_name=self.collection_name,
                     query=query_vector,
+                    query_filter=query_filter,
                     limit=limit,
                 )
                 return [point.payload for point in response.points]
@@ -190,6 +202,7 @@ class CodeVectorStore:
                 response = self.qdrant.search(
                     collection_name=self.collection_name,
                     query_vector=query_vector,
+                    query_filter=query_filter,
                     limit=limit,
                 )
                 return [point.payload for point in response]
@@ -197,6 +210,6 @@ class CodeVectorStore:
             self.log(f"⚠️ Qdrant Search Notice: {e}")
             return []
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def search(self, query: str, top_k: int = 5, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Alias interface supporting callers expecting search(query, top_k)."""
-        return self.search_similar_code(query=query, limit=top_k)
+        return self.search_similar_code(query=query, limit=top_k, workspace_id=workspace_id)

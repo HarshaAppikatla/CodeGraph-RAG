@@ -43,24 +43,43 @@ class Neo4jGraphStore:
             self.driver = None
 
     def _bootstrap_schema(self) -> None:
-        """Sets up uniqueness constraints to accelerate graph lookups and prevent duplicate nodes."""
+        """Sets up per-workspace uniqueness constraints (ws + key) for multi-tenant graphs."""
         if not self.driver:
             return
 
+        legacy = {("File", "path"), ("Class", "name"), ("Function", "name"), ("Import", "code")}
         constraints = [
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (f:File) REQUIRE f.path IS UNIQUE;",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (c:Class) REQUIRE c.name IS UNIQUE;",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (fn:Function) REQUIRE fn.name IS UNIQUE;",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (i:Import) REQUIRE i.code IS UNIQUE;",
+            "CREATE CONSTRAINT file_ws_path IF NOT EXISTS FOR (f:File) REQUIRE (f.ws, f.path) IS UNIQUE",
+            "CREATE CONSTRAINT class_ws_name IF NOT EXISTS FOR (c:Class) REQUIRE (c.ws, c.name) IS UNIQUE",
+            "CREATE CONSTRAINT function_ws_name IF NOT EXISTS FOR (fn:Function) REQUIRE (fn.ws, fn.name) IS UNIQUE",
+            "CREATE CONSTRAINT import_ws_code IF NOT EXISTS FOR (i:Import) REQUIRE (i.ws, i.code) IS UNIQUE",
         ]
 
         try:
             with self.driver.session() as session:
+                # Older databases have global single-property constraints that would
+                # stop two workspaces from sharing a file path / symbol name.
+                try:
+                    existing = list(session.run(
+                        "SHOW CONSTRAINTS YIELD name, type, labelsOrTypes, properties"
+                    ))
+                    for rec in existing:
+                        labels, props = rec["labelsOrTypes"] or [], rec["properties"] or []
+                        if (
+                            rec["type"] == "UNIQUENESS"
+                            and len(labels) == 1
+                            and len(props) == 1
+                            and (labels[0], props[0]) in legacy
+                        ):
+                            session.run(f"DROP CONSTRAINT `{rec['name']}` IF EXISTS")
+                except Exception as e:
+                    self.log(f"⚠️ Legacy constraint cleanup notice: {e}")
+
                 for query in constraints:
                     try:
                         session.run(query)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.log(f"⚠️ Constraint notice: {e}")
         except Exception as e:
             self.log(f"⚠️ Schema bootstrapping notice: {e}")
 
@@ -72,10 +91,11 @@ class Neo4jGraphStore:
             except Exception:
                 pass
 
-    def ingest_ast(self, filepath: str, ast_data: Dict[str, Any]) -> None:
+    def ingest_ast(self, filepath: str, ast_data: Dict[str, Any], workspace_id: Optional[str] = None) -> None:
         """Ingests file AST structures into Neo4j in batch transactions for maximum throughput."""
         if not self.driver or not ast_data:
             return
+        ws = workspace_id or "global"
 
         # 1. Prepare Classes payload
         classes_payload = []
@@ -128,29 +148,29 @@ class Neo4jGraphStore:
 
         # Cypher Transactions
         cypher_file_imports = """
-        MERGE (f:File {path: $filepath})
+        MERGE (f:File {path: $filepath, ws: $ws})
         SET f.updated_at = timestamp()
         WITH f
         UNWIND $imports AS imp_code
-        MERGE (imp:Import {code: imp_code})
+        MERGE (imp:Import {code: imp_code, ws: $ws})
         MERGE (f)-[:IMPORTS]->(imp)
         """
 
         cypher_classes = """
-        MATCH (f:File {path: $filepath})
+        MATCH (f:File {path: $filepath, ws: $ws})
         UNWIND $classes AS cls
-        MERGE (c:Class {name: cls.name})
+        MERGE (c:Class {name: cls.name, ws: $ws})
         MERGE (f)-[:CONTAINS_CLASS]->(c)
         WITH c, cls
         UNWIND cls.extends AS parent
-        MERGE (super:Class {name: parent})
+        MERGE (super:Class {name: parent, ws: $ws})
         MERGE (c)-[:EXTENDS]->(super)
         """
 
         cypher_functions = """
-        MATCH (f:File {path: $filepath})
+        MATCH (f:File {path: $filepath, ws: $ws})
         UNWIND $functions AS fn
-        MERGE (func:Function {name: fn.full_name})
+        MERGE (func:Function {name: fn.full_name, ws: $ws})
         SET func.short_name = fn.short_name,
             func.type = fn.type,
             func.file = $filepath,
@@ -158,30 +178,30 @@ class Neo4jGraphStore:
         MERGE (f)-[:CONTAINS_FUNCTION]->(func)
         WITH func, fn
         WHERE fn.class_name IS NOT NULL
-        MERGE (c:Class {name: fn.class_name})
+        MERGE (c:Class {name: fn.class_name, ws: $ws})
         MERGE (c)-[:HAS_METHOD]->(func)
         """
 
         cypher_calls = """
         UNWIND $calls AS call
-        MERGE (caller:Function {name: call.caller})
-        MERGE (callee:Function {name: call.callee})
+        MERGE (caller:Function {name: call.caller, ws: $ws})
+        MERGE (callee:Function {name: call.callee, ws: $ws})
         MERGE (caller)-[:CALLS]->(callee)
         """
 
         try:
             with self.driver.session() as session:
-                session.run(cypher_file_imports, filepath=filepath, imports=imports_payload)
+                session.run(cypher_file_imports, filepath=filepath, imports=imports_payload, ws=ws)
                 if classes_payload:
-                    session.run(cypher_classes, filepath=filepath, classes=classes_payload)
+                    session.run(cypher_classes, filepath=filepath, classes=classes_payload, ws=ws)
                 if functions_payload:
-                    session.run(cypher_functions, filepath=filepath, functions=functions_payload)
+                    session.run(cypher_functions, filepath=filepath, functions=functions_payload, ws=ws)
                 if calls_payload:
-                    session.run(cypher_calls, calls=calls_payload)
+                    session.run(cypher_calls, calls=calls_payload, ws=ws)
         except Exception as e:
             self.log(f"⚠️ Neo4j Ingestion Error for '{filepath}': {e}")
 
-    def analyze_impact(self, target_symbol: str) -> Dict[str, Any]:
+    def analyze_impact(self, target_symbol: str, workspace_id: Optional[str] = None) -> Dict[str, Any]:
         """Runs graph traversal to identify downstream entities impacted if target_symbol changes."""
         default_res = {
             "impact_found": False,
@@ -197,7 +217,8 @@ class Neo4jGraphStore:
             return default_res
 
         cypher = """
-        MATCH (target) WHERE target.name = $symbol OR target.short_name = $symbol
+        MATCH (target) WHERE (target.name = $symbol OR target.short_name = $symbol)
+          AND ($ws IS NULL OR target.ws = $ws)
         OPTIONAL MATCH (caller:Function)-[:CALLS*1..5]->(target)
         OPTIONAL MATCH (sub:Class)-[:EXTENDS*1..5]->(target)
         OPTIONAL MATCH (f:File)-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
@@ -209,19 +230,20 @@ class Neo4jGraphStore:
 
         try:
             with self.driver.session() as session:
-                result = session.run(cypher, symbol=target_symbol)
+                result = session.run(cypher, symbol=target_symbol, ws=workspace_id)
                 records = list(result)
 
                 if not records or not records[0]["symbol_name"]:
                     fuzzy_cypher = """
-                    MATCH (fn:Function) WHERE fn.name ENDS WITH '.' + $symbol OR fn.short_name = $symbol
+                    MATCH (fn:Function) WHERE (fn.name ENDS WITH '.' + $symbol OR fn.short_name = $symbol)
+                      AND ($ws IS NULL OR fn.ws = $ws)
                     OPTIONAL MATCH (caller:Function)-[:CALLS*1..5]->(fn)
                     OPTIONAL MATCH (f:File)-[:CONTAINS_FUNCTION]->(fn)
                     RETURN fn.name AS symbol_name, ['Function'] AS symbol_type,
                            collect(DISTINCT caller.name) AS direct_and_transitive_callers,
                            [] AS child_classes, f.path AS defined_in_file
                     """
-                    records = list(session.run(fuzzy_cypher, symbol=target_symbol))
+                    records = list(session.run(fuzzy_cypher, symbol=target_symbol, ws=workspace_id))
 
                 if not records or not records[0]["symbol_name"]:
                     default_res["message"] = f"No graph node found matching '{target_symbol}'."
@@ -240,19 +262,19 @@ class Neo4jGraphStore:
             default_res["message"] = f"Impact Analysis Cypher execution failed: {e}"
             return default_res
 
-    def get_file_graph(self, filepath: str) -> Dict[str, Any]:
+    def get_file_graph(self, filepath: str, workspace_id: Optional[str] = None) -> Dict[str, Any]:
         """Retrieves structural nodes and edges for a specific file."""
         if not self.driver:
             return {"error": "Neo4j driver not connected."}
 
         cypher = """
-        MATCH (f:File {path: $filepath})
+        MATCH (f:File) WHERE f.path = $filepath AND ($ws IS NULL OR f.ws = $ws)
         OPTIONAL MATCH (f)-[:CONTAINS_CLASS]->(c:Class)
         OPTIONAL MATCH (c)-[:HAS_METHOD]->(m:Function)
         OPTIONAL MATCH (f)-[:CONTAINS_FUNCTION]->(fn:Function)
         OPTIONAL MATCH (f)-[:IMPORTS]->(imp:Import)
         OPTIONAL MATCH (caller:Function)-[:CALLS]->(callee:Function)
-        WHERE caller.file = $filepath OR callee.file = $filepath
+        WHERE (caller.file = $filepath OR callee.file = $filepath) AND ($ws IS NULL OR caller.ws = $ws)
         RETURN f.path AS file_path,
                collect(DISTINCT c.name) AS classes,
                collect(DISTINCT fn.name) AS top_functions,
@@ -263,7 +285,7 @@ class Neo4jGraphStore:
 
         try:
             with self.driver.session() as session:
-                records = list(session.run(cypher, filepath=filepath))
+                records = list(session.run(cypher, filepath=filepath, ws=workspace_id))
                 if not records or not records[0]["file_path"]:
                     return {
                         "found": False,

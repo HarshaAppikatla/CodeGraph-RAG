@@ -356,12 +356,13 @@ If you prefer to run services individually without Docker:
 ### 1. Backend Setup
 
 ```bash
-# Navigate to backend and install dependencies
-cd backend
-pip install -r requirements.txt
+# From the repository root (so the `backend` package resolves), install dependencies
+pip install -r backend/requirements.txt
+
+# Optional: copy backend/.env.example to ./.env (settings are read from the working directory)
 
 # Start the FastAPI server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### 2. Frontend Setup

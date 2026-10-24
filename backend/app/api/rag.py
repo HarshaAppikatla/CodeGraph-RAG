@@ -4,8 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.app.config import settings
-from backend.app.services.graph_store import Neo4jGraphStore
-from backend.app.services.vector_store import CodeVectorStore
+from backend.app.services.registry import get_graph_store, get_vector_store
 
 router = APIRouter(prefix="/rag", tags=["Retrieval-Augmented Generation & Graph Impact"])
 
@@ -26,6 +25,8 @@ class RefactorRequest(BaseModel):
     prompt: str
     gemini_api_key: Optional[str] = None
 
+
+DEMO_WORKSPACE_IDS = {"ws-study-sync", "ws-payment-gw"}
 
 # Pre-computed structural graphs for instant, flawless UI inspection
 CANONICAL_SYMBOLS = {
@@ -96,14 +97,15 @@ def analyze_impact(req: ImpactRequest):
     """Executes multi-hop Cypher queries and calculates blast-radius impact metadata."""
     symbol = req.symbol.strip()
 
-    # If canonical symbol preloaded, return rich graph data
-    if symbol in CANONICAL_SYMBOLS:
+    # Canned graphs only describe the bundled demo workspaces
+    is_demo = req.workspace_id in DEMO_WORKSPACE_IDS
+    if is_demo and symbol in CANONICAL_SYMBOLS:
         return CANONICAL_SYMBOLS[symbol]
 
     # Otherwise query Neo4j live
     try:
-        graph_store = Neo4jGraphStore()
-        impact = graph_store.analyze_impact(symbol)
+        graph_store = get_graph_store()
+        impact = graph_store.analyze_impact(symbol, workspace_id=req.workspace_id)
         callers = impact.get("affected_callers", [])
         return {
             "name": symbol,
@@ -129,8 +131,9 @@ def analyze_impact(req: ImpactRequest):
             "codeSnippet": f"// Live symbol definition from Neo4j:\n{symbol}"
         }
     except Exception as e:
-        # Graceful fallback to default symbol
-        return CANONICAL_SYMBOLS["generateToken"]
+        if is_demo:
+            return CANONICAL_SYMBOLS["generateToken"]
+        raise HTTPException(status_code=503, detail=f"Graph store unavailable: {e}")
 
 
 @router.post("/query")
@@ -141,8 +144,8 @@ def run_hybrid_rag_query(req: QueryRequest):
 
     retrieved_chunks = []
     try:
-        vector_store = CodeVectorStore()
-        retrieved_chunks = vector_store.search(query, top_k=3)
+        vector_store = get_vector_store()
+        retrieved_chunks = vector_store.search(query, top_k=3, workspace_id=req.workspace_id)
     except Exception:
         pass
 
