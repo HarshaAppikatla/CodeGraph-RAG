@@ -7,13 +7,19 @@
 
 <br/>
 
+[![Watch 2-Min Demo](https://img.shields.io/badge/%E2%96%B6_Watch_2--Min_Video_Demo-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://youtube.com)
+[![Live Interactive App](https://img.shields.io/badge/%F0%9F%8C%90_Live_Interactive_Demo-2563EB?style=for-the-badge&logo=googlechrome&logoColor=white)](https://your-live-demo-url.com)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/appikatlaharshavardhan/)
+
+<br/>
+
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)](https://react.dev/)
 [![Tree--Sitter](https://img.shields.io/badge/Tree--Sitter-Polyglot_AST-1B1F23?style=for-the-badge&logo=tree-sitter&logoColor=white)](https://tree-sitter.github.io/)
 [![Neo4j](https://img.shields.io/badge/Neo4j-AuraDB%20%7C%20Graph-008CC1?style=for-the-badge&logo=neo4j&logoColor=white)](https://neo4j.com/)
 [![Qdrant](https://img.shields.io/badge/Qdrant-Vector_DB-DC2626?style=for-the-badge&logo=qdrant&logoColor=white)](https://qdrant.tech/)
-[![Google Gemini](https://img.shields.io/badge/Google_Gemini-2.5%20%7C%203.8-8E75C2?style=for-the-badge&logo=google-gemini&logoColor=white)](https://ai.google.dev/)
+[![Google Gemini](https://img.shields.io/badge/Google_Gemini-2.5%20%7C%201.5%20Pro-8E75C2?style=for-the-badge&logo=google-gemini&logoColor=white)](https://ai.google.dev/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-Protocol_JSON--RPC-blueviolet?style=for-the-badge&logo=anthropic&logoColor=white)](https://modelcontextprotocol.io/)
 [![Docker](https://img.shields.io/badge/Docker-Compose_Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](./LICENSE)
@@ -23,6 +29,7 @@
 
 [Key Features](#-key-features) •
 [The Core Problem](#-the-core-problem-solved) •
+[Quick Example](#-quick-example-programmatic-blast-radius-check) •
 [System Architecture](#️-system-architecture) •
 [Visual Preview](#️-visual-dashboard--blast-radius-preview) •
 [Tech Stack](#️-complete-tech-stack-matrix) •
@@ -30,11 +37,14 @@
 [Monorepo Structure](#-monorepo-directory-structure) •
 [1-Click Quickstart](#-1-click-quickstart-with-docker-compose) •
 [Benchmarks](#-system-performance-benchmark) •
-[Author & License](#-author)
+[Author & License](#-author--contact)
 
 <br/>
 
 </div>
+
+> ### 💡 What is CodeGraph-RAG? (TL;DR)
+> **CodeGraph-RAG** is Google Maps for your codebase. Traditional AI coding assistants search for text snippets, but remain blind to execution flows—leading to broken code during refactoring. CodeGraph-RAG combines **Tree-sitter AST parsing** and **Neo4j Property Knowledge Graphs** with **Embedded Qdrant Vector Search** to map every function caller, predict the exact **blast radius** of any code change, and feed zero-hallucination context directly into **Cursor, VS Code, and Claude Desktop** via the Model Context Protocol (MCP).
 
 ---
 
@@ -45,7 +55,7 @@
 - **⚡ Dual-Stream Context Retrieval**: Merges high-dimensional dense code vector search (**Qdrant** + local 384D BGE / 3072D Gemini embeddings) with structural graph traversal context to completely eliminate code-hallucination.
 - **🤖 Autonomous Refactor & Patch Synthesizer**: Produces unified Git patches (`--- a/` / `+++ b/`) tailored to codebase architecture, simulating impacts before changes are committed.
 - **🔌 Native Model Context Protocol (MCP)**: Exposes a standardized stdio JSON-RPC 2.0 interface for instantaneous integration with **VS Code**, **Cursor IDE**, and **Claude Desktop**.
-- **🛡️ Multi-Tier Resilient Model Failover**: Built-in automatic retry and fallback across Gemini models (`gemini-2.5-flash`, `gemini-3.8-flash`, `gemini-1.5-pro`) to gracefully mitigate quota (`429`) and server (`503`) rate limits.
+- **🛡️ Multi-Tier Resilient Model Failover**: Built-in automatic retry and fallback across production models (`gemini-2.5-flash`, `gemini-1.5-pro`, Groq LLaMA 3.3) with dynamic model discovery and cooldowns to gracefully mitigate quota (`429`) and server (`503`) rate limits.
 - **📊 Blast-Radius Command Center**: Visualizes impact assessment, affected callers, and dependency chains in an interactive React 18 dashboard.
 
 ---
@@ -81,6 +91,25 @@ Standard Code RAG systems rely strictly on naive chunked vector embeddings. When
 
 ---
 
+## ⚡ Quick Example: Programmatic Blast-Radius Check
+
+Query the graph engine programmatically without booting the full web UI:
+
+```python
+from backend.app.services.graph_store import CodeGraphStore
+
+# Connect to local or cloud Neo4j graph instance
+graph = CodeGraphStore(uri="bolt://localhost:7687", auth=("neo4j", "password"))
+
+# Calculate N-hop blast radius for any symbol across the codebase
+impact = graph.get_blast_radius(symbol_name="generateToken", max_depth=3)
+
+print(f"🔥 Blast Radius: {impact['total_affected_callers']} upstream callers across {len(impact['affected_files'])} files.")
+# Output: 🔥 Blast Radius: 4 upstream callers across 4 files.
+```
+
+---
+
 ## 🏗️ System Architecture
 
 ### End-to-End Architectural Pipeline
@@ -109,7 +138,7 @@ flowchart TD
 
     subgraph Reasoning ["LLM Synthesis & Failover Mesh"]
         Fusion["Hybrid Context Fusion & Re-ranker"]
-        LLM["Google Gemini Reasoning Engine\n(2.5-Flash ➔ 3.8-Flash ➔ 1.5-Pro)"]
+        LLM["Multi-Model Reasoning Mesh\n(Gemini 2.5-Flash ➔ 1.5-Pro ➔ Groq)"]
         Synthesizer["Diff Synthesizer & Blast-Radius Formatter"]
     end
 
@@ -197,11 +226,11 @@ flowchart TD
 | **Backend API** | ![FastAPI](https://img.shields.io/badge/-FastAPI-009688?logo=fastapi&logoColor=white) ![Python](https://img.shields.io/badge/-Python_3.10+-3776AB?logo=python&logoColor=white) | Multi-tenant REST backend, background task queues, and CORS-hardened endpoints |
 | **AST Parsing** | ![Tree-sitter](https://img.shields.io/badge/-Tree--sitter-1B1F23?logo=tree-sitter&logoColor=white) | Polyglot static code analysis, structural entity extraction, and scope resolution |
 | **Graph DB** | ![Neo4j](https://img.shields.io/badge/-Neo4j_AuraDB-008CC1?logo=neo4j&logoColor=white) | Hierarchical containment, call hierarchy tracing, and recursive blast radius calculation |
-| **Vector DB** | ![Qdrant](https://img.shields.io/badge/-Qdrant-DC2626?logo=qdrant&logoColor=white) | Ultra-fast high-dimensional code snippet indexing and dense similarity retrieval |
+| **Vector DB** | ![Qdrant](https://img.shields.io/badge/-Qdrant-DC2626?logo=qdrant&logoColor=white) | Zero-ops embedded local storage (`./qdrant_data`) & high-dimensional dense vector similarity search |
 | **Embedding Engine** | `sentence-transformers` (`BAAI/bge-small-en-v1.5`) & `gemini-embedding-001` | CPU-optimized local 384D / cloud 3072D dense vector generation |
 | **IDE Protocol** | ![MCP](https://img.shields.io/badge/-Model_Context_Protocol-blueviolet?logo=anthropic&logoColor=white) | Standardized stdio JSON-RPC 2.0 RPC wrapper exposing tools to VS Code & Cursor |
 | **Relational DB** | ![SQLAlchemy](https://img.shields.io/badge/-SQLAlchemy-D71F00?logo=sqlalchemy&logoColor=white) ![PostgreSQL](https://img.shields.io/badge/-PostgreSQL-4169E1?logo=postgresql&logoColor=white) | Relational persistence for user accounts, workspace metadata, and audit logs |
-| **LLM Reasoning** | ![Google Gemini](https://img.shields.io/badge/-Gemini_2.5_%2F_3.8-8E75C2?logo=google-gemini&logoColor=white) | High-speed synthesized architectural answers, code reasoning, and diff generation |
+| **LLM Reasoning** | ![Google Gemini](https://img.shields.io/badge/-Gemini_2.5_%2F_1.5_Pro-8E75C2?logo=google-gemini&logoColor=white) ![Groq](https://img.shields.io/badge/-Groq-F55036?logo=groq&logoColor=white) | Multi-provider failover mesh (Gemini 2.5 / 1.5 Pro, Groq LLaMA 3.3) with automated quota cooldowns |
 | **Containerization** | ![Docker](https://img.shields.io/badge/-Docker_Compose-2496ED?logo=docker&logoColor=white) | Multi-service local and production orchestration (`backend`, `frontend`, `neo4j`) |
 
 ---
@@ -437,6 +466,11 @@ Evaluated across production multi-module repositories (including **Study-Sync**,
 | **Relevancy Score** | **5.0 / 5.0** | Direct adherence to query constraints and structural specifics |
 | **Failover Resilience** | **100%** | Zero failure rate during rate limits via dynamic model failover |
 
+### 📐 Evaluation Methodology & Engineering Boundaries
+* **Benchmark Context**: Evaluated on multi-module repositories (e.g., Study-Sync: 211 files, 2,533 graph nodes) using LLM-as-a-Judge (`evaluation/evaluator.py`) across N=50 synthetic architectural queries.
+* **Static Analysis Scope**: Tree-sitter AST extraction deterministically resolves static class hierarchies, function calls, and import bindings.
+* **Known Limitations**: Dynamic runtime reflection (e.g., Python `getattr()`, `eval()`, JavaScript runtime dispatch) requires complementary LSP/tracing integration (planned for v2.0).
+
 ---
 
 ## 🛠️ Common Troubleshooting
@@ -478,8 +512,11 @@ Distributed under the **MIT License**. See [`LICENSE`](./LICENSE) for more infor
 
 ---
 
-## 👤 Author
+## 👤 Author & Contact
 
 **Appikatla Harsha Vardhan**
-* GitHub: [@HarshaAppikatla](https://github.com/HarshaAppikatla)
-* Project Repository: [CodeGraph-RAG](https://github.com/HarshaAppikatla/CodeGraph-RAG)
+* 💼 **LinkedIn**: [linkedin.com/in/appikatlaharshavardhan](https://www.linkedin.com/in/appikatlaharshavardhan/)
+* 📧 **Email**: [harshaappikatla.cs@gmail.com](mailto:harshaappikatla.cs@gmail.com)
+* 🐙 **GitHub**: [@HarshaAppikatla](https://github.com/HarshaAppikatla)
+* 🌐 **Portfolio**: [harshaappikatla.github.io](https://harshaappikatla.github.io/)
+* 📂 **Project Repository**: [CodeGraph-RAG](https://github.com/HarshaAppikatla/CodeGraph-RAG)
