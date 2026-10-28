@@ -7,12 +7,17 @@ from backend.app.database import init_db
 from backend.app.api.auth import router as auth_router
 from backend.app.api.workspace import router as workspace_router
 from backend.app.api.rag import router as rag_router
+from backend.app.api.keys import router as keys_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize database tables on startup
     init_db()
+    # Pre-warm vector store and SentenceTransformer in background thread so user never waits on cold start
+    import threading
+    from backend.app.services.registry import get_vector_store
+    threading.Thread(target=get_vector_store, daemon=True, name="prewarm_vector_store").start()
     yield
 
 
@@ -46,6 +51,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api")
 app.include_router(workspace_router, prefix="/api")
 app.include_router(rag_router, prefix="/api")
+app.include_router(keys_router, prefix="/api")
 
 
 @app.get("/")

@@ -227,3 +227,6 @@ __marimo__/
 # Local Qdrant vector database store
 qdrant_data/
 */qdrant_data/
+
+# Git patch files
+*.patch

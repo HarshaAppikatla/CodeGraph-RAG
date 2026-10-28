@@ -7,9 +7,7 @@ Base = declarative_base()
 
 # Attempt primary database connection; fall back to local SQLite if PostgreSQL is unreachable
 database_url = settings.DATABASE_URL
-connect_args = {}
-if database_url.startswith("sqlite"):
-    connect_args = {"check_same_thread": False}
+connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {"connect_timeout": 1}
 
 try:
     engine = create_engine(database_url, connect_args=connect_args, pool_pre_ping=True)
@@ -34,5 +32,36 @@ def get_db():
 
 
 def init_db():
-    """Initializes schema tables on startup."""
+    """Initializes schema tables on startup and migrates columns if needed."""
     Base.metadata.create_all(bind=engine)
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            driver = engine.url.drivername.lower()
+            if "sqlite" in driver:
+                cols = [row[1] for row in conn.execute(text("PRAGMA table_info(users)")).fetchall()]
+                new_cols = [
+                    ("gemini_key_encrypted", "VARCHAR(512)"),
+                    ("openai_key_encrypted", "VARCHAR(512)"),
+                    ("anthropic_key_encrypted", "VARCHAR(512)"),
+                    ("deepseek_key_encrypted", "VARCHAR(512)"),
+                    ("groq_key_encrypted", "VARCHAR(512)"),
+                    ("provider_keys_encrypted", "VARCHAR(4096)"),
+                ]
+                for col_name, col_type in new_cols:
+                    if col_name not in cols:
+                        conn.execute(text(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}"))
+                conn.commit()
+            elif "postgres" in driver:
+                for col_name, col_type in [
+                    ("gemini_key_encrypted", "VARCHAR(512)"),
+                    ("openai_key_encrypted", "VARCHAR(512)"),
+                    ("anthropic_key_encrypted", "VARCHAR(512)"),
+                    ("deepseek_key_encrypted", "VARCHAR(512)"),
+                    ("groq_key_encrypted", "VARCHAR(512)"),
+                    ("provider_keys_encrypted", "VARCHAR(4096)"),
+                ]:
+                    conn.execute(text(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
+                conn.commit()
+    except Exception as e:
+        sys.stderr.write(f"⚠️ DB migration notice: {e}\n")
