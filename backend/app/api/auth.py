@@ -10,6 +10,7 @@ from passlib.context import CryptContext
 from backend.app.config import settings
 from backend.app.database import get_db
 from backend.app.models.user import User
+from backend.app.services.security import encrypt_api_key, decrypt_api_key, mask_api_key
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -55,7 +56,7 @@ def get_current_user_optional(
         user_id = payload.get("sub")
         if not user_id:
             return None
-        return db.query(User).filter(User.id == user_id).first()
+        return db.query(User).filter((User.id == user_id) | (User.email == user_id)).first()
     except Exception:
         return None
 
@@ -139,3 +140,64 @@ def login_user(req: AuthRequest, db: Session = Depends(get_db)):
             isDemo=(user.email == "harsha.demo@codegraph.ai"),
         ),
     )
+
+
+class GeminiKeyRequest(BaseModel):
+    gemini_api_key: str
+
+
+class GeminiKeyResponse(BaseModel):
+    status: str
+    configured: bool
+    masked_key: Optional[str] = None
+
+
+@router.post("/gemini-key", response_model=GeminiKeyResponse)
+def save_user_gemini_key(
+    req: GeminiKeyRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
+    """Securely encrypts and stores the user's Gemini API key in the database."""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required to store API key.")
+    raw = req.gemini_api_key.strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Gemini API key cannot be empty.")
+    encrypted = encrypt_api_key(raw)
+    current_user.gemini_key_encrypted = encrypted
+    db.commit()
+    db.refresh(current_user)
+    return GeminiKeyResponse(
+        status="saved",
+        configured=True,
+        masked_key=mask_api_key(raw),
+    )
+
+
+@router.get("/gemini-key", response_model=GeminiKeyResponse)
+def get_user_gemini_key(
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Returns the masked status of the user's encrypted Gemini API key."""
+    if not current_user or not current_user.gemini_key_encrypted:
+        return GeminiKeyResponse(status="not_configured", configured=False, masked_key=None)
+    raw = decrypt_api_key(current_user.gemini_key_encrypted)
+    return GeminiKeyResponse(
+        status="configured",
+        configured=bool(raw),
+        masked_key=mask_api_key(raw),
+    )
+
+
+@router.delete("/gemini-key", response_model=GeminiKeyResponse)
+def delete_user_gemini_key(
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
+    """Deletes the stored encrypted Gemini API key for the current user."""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    current_user.gemini_key_encrypted = None
+    db.commit()
+    return GeminiKeyResponse(status="cleared", configured=False, masked_key=None)

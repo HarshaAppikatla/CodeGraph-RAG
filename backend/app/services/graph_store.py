@@ -16,7 +16,7 @@ class Neo4jGraphStore:
         password: Optional[str] = None,
     ):
         self.uri = uri or settings.NEO4J_URI
-        self.user = user or settings.NEO4J_USERNAME
+        self.user = user or settings.neo4j_user
         self.password = password or settings.NEO4J_PASSWORD
         self.driver: Optional[Driver] = None
         self._connect()
@@ -201,6 +201,219 @@ class Neo4jGraphStore:
         except Exception as e:
             self.log(f"⚠️ Neo4j Ingestion Error for '{filepath}': {e}")
 
+    def analyze_blast_radius_with_inheritance(
+        self, symbol: str, workspace_id: Optional[str] = None, max_hops: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Executes multi-hop Cypher traversals spanning [:CALLS], [:EXTENDS], [:IMPLEMENTS], and [:OVERRIDES].
+        Traces downstream implementations and upstream callers across multi-module projects.
+        """
+        default_res = {
+            "impact_found": False,
+            "symbol": symbol,
+            "target_symbol": symbol,
+            "defined_in_file": "Unknown",
+            "blast_radius_score": 0.0,
+            "riskScore": "0.0 / 10",
+            "riskLevel": "LOW",
+            "affected_callers": [],
+            "affected_subclasses": [],
+            "affected_files": [],
+            "nodes": [],
+            "edges": [],
+            "message": "Neo4j driver not connected or node not found.",
+        }
+
+        if not self.driver:
+            return default_res
+
+        safe_hops = min(5, max(1, int(max_hops)))
+
+        cypher_query = f"""
+        MATCH (target) WHERE (target.name = $symbol OR target.short_name = $symbol OR target.name ENDS WITH ('.' + $symbol))
+          AND ($ws IS NULL OR target.ws = $ws OR target.workspace_id = $ws)
+
+        // 1. Fetch Interface & Class Hierarchy (Upstream & Downstream)
+        OPTIONAL MATCH (target)-[:EXTENDS|IMPLEMENTS*1..2]->(parent)
+        OPTIONAL MATCH (child)-[:EXTENDS|IMPLEMENTS*1..2]->(target)
+
+        // 2. Fetch Callers across all overrides & implementations
+        OPTIONAL MATCH (caller)-[:CALLS*1..{safe_hops}]->(target)
+        OPTIONAL MATCH (child_caller)-[:CALLS*1..{safe_hops}]->(child)
+
+        // 3. File containing target
+        OPTIONAL MATCH (f:File)-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
+
+        RETURN 
+            target,
+            labels(target) as target_labels,
+            f.path as defined_file,
+            collect(DISTINCT parent) as parents,
+            collect(DISTINCT child) as children,
+            collect(DISTINCT caller) as direct_callers,
+            collect(DISTINCT child_caller) as child_callers
+        """
+
+        try:
+            with self.driver.session() as session:
+                result = session.run(cypher_query, symbol=symbol, ws=workspace_id)
+                records = list(result)
+                if not records or not records[0]["target"]:
+                    default_res["message"] = f"Symbol '{symbol}' not found in Neo4j graph."
+                    return default_res
+
+                # In case multiple nodes matched, choose the one with known file and most callers
+                record = max(
+                    records,
+                    key=lambda r: (
+                        bool(r.get("defined_file") or (r["target"].get("file") if hasattr(r["target"], "get") else None)),
+                        len(r.get("direct_callers") or [])
+                    )
+                )
+
+                target_node = record["target"]
+                target_name = (target_node.get("name") if hasattr(target_node, "get") else None) or symbol
+                target_file = (
+                    (target_node.get("file") if hasattr(target_node, "get") else None)
+                    or record.get("defined_file")
+                    or "Unknown"
+                )
+                target_scope = (
+                    (target_node.get("scope") if hasattr(target_node, "get") else None)
+                    or (f"Class {target_name.split('.')[0]}" if "." in target_name else "Target Symbol")
+                )
+
+                parents = [p for p in (record.get("parents") or []) if p]
+                children = [c for c in (record.get("children") or []) if c]
+                callers = [c for c in (record.get("direct_callers") or []) if c]
+                child_callers = [c for c in (record.get("child_callers") or []) if c]
+
+                base_file_name = target_file.replace("\\", "/").split("/")[-1]
+
+                nodes = [{
+                    "id": "target",
+                    "label": target_name,
+                    "file": base_file_name,
+                    "full_path": target_file,
+                    "type": "TARGET",
+                    "scope": target_scope,
+                    "risk": "HIGH",
+                    "x": 400,
+                    "y": 200,
+                }]
+                edges = []
+
+                # Process Parents ([:EXTENDS] / [:IMPLEMENTS])
+                for i, p in enumerate(parents):
+                    p_name = (p.get("name") if hasattr(p, "get") else str(p)) or f"Parent_{i}"
+                    p_file = (p.get("file") if hasattr(p, "get") else "Unknown") or "Unknown"
+                    p_id = f"parent_{i}"
+                    nodes.append({
+                        "id": p_id,
+                        "label": p_name,
+                        "file": p_file.replace("\\", "/").split("/")[-1],
+                        "full_path": p_file,
+                        "type": "INTERFACE" if "interface" in p_name.lower() else "SUPERCLASS",
+                        "scope": "Inherited Contract",
+                        "x": 220 + (i * 120),
+                        "y": 80,
+                    })
+                    edges.append({"from": "target", "to": p_id, "label": "[:IMPLEMENTS|EXTENDS]", "hop": "Contract"})
+
+                # Process Child Subclasses / Interface Implementations
+                for i, c in enumerate(children):
+                    c_name = (c.get("name") if hasattr(c, "get") else str(c)) or f"Child_{i}"
+                    c_file = (c.get("file") if hasattr(c, "get") else "Unknown") or "Unknown"
+                    c_id = f"child_{i}"
+                    nodes.append({
+                        "id": c_id,
+                        "label": c_name,
+                        "file": c_file.replace("\\", "/").split("/")[-1],
+                        "full_path": c_file,
+                        "type": "IMPLEMENTATION",
+                        "scope": "Override / Subclass",
+                        "x": 580 + (i * 120),
+                        "y": 80,
+                    })
+                    edges.append({"from": c_id, "to": "target", "label": "[:OVERRIDES]", "hop": "Polymorphic"})
+
+                # Process Direct Callers
+                seen_caller_names = set()
+                for i, c_node in enumerate(callers):
+                    c_name = (c_node.get("name") if hasattr(c_node, "get") else str(c_node)) or f"Caller_{i}"
+                    if c_name in seen_caller_names:
+                        continue
+                    seen_caller_names.add(c_name)
+                    c_file = (c_node.get("file") if hasattr(c_node, "get") else "Unknown") or "Unknown"
+                    c_id = f"caller_{i}"
+                    nodes.append({
+                        "id": c_id,
+                        "label": c_name,
+                        "file": c_file.replace("\\", "/").split("/")[-1],
+                        "full_path": c_file,
+                        "type": "DIRECT_CALLER",
+                        "scope": f"Direct Call ({c_file.replace('\\', '/').split('/')[-1]})",
+                        "x": 200 + (len(seen_caller_names) * 110),
+                        "y": 340,
+                    })
+                    edges.append({"from": c_id, "to": "target", "label": "[:CALLS]", "hop": "1st Hop"})
+
+                # Process Polymorphic Child Callers
+                for i, cc_node in enumerate(child_callers):
+                    cc_name = (cc_node.get("name") if hasattr(cc_node, "get") else str(cc_node)) or f"ChildCaller_{i}"
+                    if cc_name in seen_caller_names:
+                        continue
+                    seen_caller_names.add(cc_name)
+                    cc_file = (cc_node.get("file") if hasattr(cc_node, "get") else "Unknown") or "Unknown"
+                    cc_id = f"child_caller_{i}"
+                    nodes.append({
+                        "id": cc_id,
+                        "label": cc_name,
+                        "file": cc_file.replace("\\", "/").split("/")[-1],
+                        "full_path": cc_file,
+                        "type": "DIRECT_CALLER",
+                        "scope": f"Polymorphic Call ({cc_file.replace('\\', '/').split('/')[-1]})",
+                        "x": 200 + (len(seen_caller_names) * 110),
+                        "y": 340,
+                    })
+                    edges.append({"from": cc_id, "to": "target", "label": "[:CALLS]", "hop": "Polymorphic"})
+
+                all_callers_count = len(seen_caller_names)
+                blast_score = round(min(10.0, 1.5 + (all_callers_count * 1.2) + (len(children) * 1.5)), 1)
+                risk_level = "HIGH" if blast_score >= 6.5 else "MEDIUM" if blast_score >= 3.5 else "LOW"
+
+                affected_files = list(set([
+                    n["full_path"] for n in nodes if n.get("full_path") and n["full_path"] != "Unknown"
+                ]))
+
+                return {
+                    "impact_found": True,
+                    "symbol": target_name,
+                    "target_symbol": target_name,
+                    "name": target_name,
+                    "defined_in_file": target_file,
+                    "file": target_file,
+                    "scope": target_scope,
+                    "type": "Method" if "." in target_name else "Class",
+                    "signature": f"symbol {target_name}",
+                    "blast_radius_score": blast_score,
+                    "riskScore": f"{blast_score} / 10",
+                    "riskLevel": risk_level,
+                    "blastRadiusHops": min(5, max(1, len(edges))),
+                    "affected_callers": list(seen_caller_names),
+                    "affected_subclasses": [c.get("name") for c in children if hasattr(c, "get") and c.get("name")],
+                    "affected_files": affected_files or [target_file],
+                    "nodes": nodes,
+                    "edges": edges,
+                }
+        except Exception as e:
+            self.log(f"⚠️ Blast Radius Inheritance Cypher error: {e}")
+            return {
+                "impact_found": False,
+                "symbol": symbol,
+                "message": f"Blast radius traversal failed: {e}",
+            }
+
     def analyze_impact(self, target_symbol: str, workspace_id: Optional[str] = None) -> Dict[str, Any]:
         """Runs graph traversal to identify downstream entities impacted if target_symbol changes."""
         default_res = {
@@ -249,7 +462,14 @@ class Neo4jGraphStore:
                     default_res["message"] = f"No graph node found matching '{target_symbol}'."
                     return default_res
 
-                record = records[0]
+                # Several nodes can share a name: prefer one with a known file and the most callers
+                record = max(
+                    records,
+                    key=lambda r: (
+                        bool(r["defined_in_file"]),
+                        len([c for c in r["direct_and_transitive_callers"] if c]),
+                    ),
+                )
                 return {
                     "impact_found": True,
                     "target_symbol": record["symbol_name"],
@@ -307,3 +527,106 @@ class Neo4jGraphStore:
                 }
         except Exception as e:
             return {"error": f"Failed to retrieve file graph for '{filepath}': {e}"}
+
+    def get_workspace_architecture_graph(
+        self, workspace_id: Optional[str] = None, limit: int = 250
+    ) -> Dict[str, Any]:
+        """
+        Retrieves the unified architecture graph of all nodes connected by different relations:
+        - Class inheritance: [:EXTENDS], [:IMPLEMENTS]
+        - Class methods: [:HAS_METHOD]
+        - Cross-class function calls: [:CALLS]
+        - File containment: [:CONTAINS_CLASS], [:CONTAINS_FUNCTION]
+        - File imports: [:IMPORTS]
+        """
+        if not self.driver:
+            return {"connected": False, "nodes": [], "edges": [], "message": "Neo4j driver not connected."}
+
+        cypher = """
+        MATCH (n) WHERE ($ws IS NULL OR n.ws = $ws OR n.workspace_id = $ws)
+        OPTIONAL MATCH (n)-[r]->(m) WHERE ($ws IS NULL OR m.ws = $ws OR m.workspace_id = $ws)
+        RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
+        LIMIT $limit
+        """
+
+        try:
+            with self.driver.session() as session:
+                records = list(session.run(cypher, ws=workspace_id, limit=limit))
+                nodes_map = {}
+                edges = []
+
+                for rec in records:
+                    n = rec.get("n")
+                    m = rec.get("m")
+                    r = rec.get("r")
+                    r_type = rec.get("r_type") or "RELATES"
+
+                    def _extract_node(node_obj, labels):
+                        if not node_obj:
+                            return None
+                        raw_id = (
+                            (node_obj.get("name") if hasattr(node_obj, "get") else None)
+                            or (node_obj.get("path") if hasattr(node_obj, "get") else None)
+                            or str(getattr(node_obj, "id", ""))
+                        )
+                        if not raw_id:
+                            return None
+
+                        labels_set = set(labels or [])
+                        is_file = "File" in labels_set or "/" in raw_id or "\\" in raw_id or raw_id.endswith(".java") or raw_id.endswith(".go") or raw_id.endswith(".py") or raw_id.endswith(".js")
+                        is_class = "Class" in labels_set or (raw_id[:1].isupper() and "." not in raw_id and not is_file)
+                        is_iface = "interface" in raw_id.lower() or "Repository" in raw_id or "Details" in raw_id
+                        is_method = "Function" in labels_set or "." in raw_id
+
+                        node_type = (
+                            "FILE" if is_file
+                            else "INTERFACE" if is_iface
+                            else "CLASS" if is_class
+                            else "METHOD" if is_method
+                            else "SYMBOL"
+                        )
+
+                        display_label = (
+                            (node_obj.get("short_name") if hasattr(node_obj, "get") else None)
+                            or raw_id.replace("\\", "/").split("/")[-1]
+                        )
+
+                        return {
+                            "id": raw_id,
+                            "label": display_label,
+                            "type": node_type,
+                            "file": (node_obj.get("file") if hasattr(node_obj, "get") else None) or (raw_id if is_file else "Unknown"),
+                            "scope": (node_obj.get("scope") if hasattr(node_obj, "get") else None) or f"{node_type} Scope",
+                        }
+
+                    node_n = _extract_node(n, rec.get("n_labels"))
+                    if node_n and node_n["id"] not in nodes_map:
+                        nodes_map[node_n["id"]] = node_n
+
+                    node_m = _extract_node(m, rec.get("m_labels"))
+                    if node_m and node_m["id"] not in nodes_map:
+                        nodes_map[node_m["id"]] = node_m
+
+                    if node_n and node_m and r:
+                        edges.append({
+                            "from": node_n["id"],
+                            "to": node_m["id"],
+                            "label": f"[:{r_type}]",
+                            "relationType": r_type.replace("CONTAINS_CLASS", "CONTAINS").replace("CONTAINS_FUNCTION", "CONTAINS"),
+                        })
+
+                if not nodes_map:
+                    return {"connected": False, "nodes": [], "edges": [], "message": "No nodes found in Neo4j."}
+
+                return {
+                    "connected": True,
+                    "nodes": list(nodes_map.values()),
+                    "edges": edges,
+                    "stats": {
+                        "totalNodes": len(nodes_map),
+                        "totalEdges": len(edges),
+                    }
+                }
+        except Exception as e:
+            self.log(f"⚠️ get_workspace_architecture_graph failed: {e}")
+            return {"connected": False, "nodes": [], "edges": [], "message": f"Architecture query failed: {e}"}
