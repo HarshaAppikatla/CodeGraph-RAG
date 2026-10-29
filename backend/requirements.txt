@@ -5,6 +5,7 @@ email-validator>=2.1.0
 pydantic-settings>=2.2.0
 sqlalchemy>=2.0.28
 psycopg2-binary>=2.9.9
+psycopg[binary]>=3.1.18
 neo4j>=5.18.0
 qdrant-client>=1.8.0
 sentence-transformers>=2.5.0
@@ -23,4 +24,3 @@ passlib[bcrypt]>=1.7.4
 bcrypt>=4.0.1,<4.1
 python-dotenv>=1.0.0
 litellm>=1.100.0
-

@@ -22,19 +22,10 @@ class CodeVectorStore:
         self.collection_name = collection_name
         self.qdrant_path = qdrant_path
         self.model_name = model_name
+        self.vector_size = 384
+        self._model = None
 
-        # 1. Initialize Local SentenceTransformer Model
-        self.log(f"🎯 Initializing local embedding model '{self.model_name}'...")
-        try:
-            self.model = SentenceTransformer(self.model_name)
-            self.vector_size = self.model.get_sentence_embedding_dimension()
-            self.log(f"✅ Local model loaded successfully ({self.vector_size} dims).")
-        except Exception as e:
-            self.log(f"⚠️ Failed to load local embedding model '{self.model_name}': {e}")
-            self.model = None
-            self.vector_size = 384
-
-        # 2. Initialize Qdrant Client (Cloud or local embedded storage)
+        # 1. Initialize Qdrant Client (Cloud or local embedded storage)
         qdrant_host = os.getenv("QDRANT_HOST")
         qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
@@ -63,8 +54,24 @@ class CodeVectorStore:
         self.client = self.qdrant
         atexit.register(self._safe_close)
 
-        # 3. Bootstrap Collection
+        # 2. Bootstrap Collection
         self._ensure_collection()
+
+    @property
+    def model(self):
+        """Lazy loads the embedding model with CPU single-threading to fit well within 512MB RAM."""
+        if self._model is None:
+            self.log(f"🎯 Loading embedding model '{self.model_name}' on demand...")
+            try:
+                import torch
+                torch.set_num_threads(1)
+                self._model = SentenceTransformer(self.model_name)
+                self.vector_size = self._model.get_sentence_embedding_dimension()
+                self.log(f"✅ Local model loaded successfully ({self.vector_size} dims).")
+            except Exception as e:
+                self.log(f"⚠️ Failed to load local embedding model '{self.model_name}': {e}")
+                self._model = None
+        return self._model
 
     def log(self, message: str) -> None:
         """Logs messages to sys.stderr to preserve stdout for MCP JSON-RPC protocol messages."""

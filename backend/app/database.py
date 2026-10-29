@@ -9,9 +9,11 @@ Base = declarative_base()
 # 1. Resolve and normalize database URL
 db_url = os.getenv("DATABASE_URL", getattr(settings, "DATABASE_URL", "sqlite:///./codegraph.db"))
 
-# Fix legacy Heroku/Render Postgres URL prefixes for SQLAlchemy
+# Fix legacy Heroku/Render Postgres URL prefixes and specify psycopg2 driver for SQLAlchemy
 if db_url.startswith("postgres://"):
-    db_url = db_url.replace("postgres://", "postgresql://", 1)
+    db_url = db_url.replace("postgres://", "postgresql+psycopg2://", 1)
+elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+"):
+    db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 engine_kwargs = {"pool_pre_ping": True}
 if db_url.startswith("sqlite"):

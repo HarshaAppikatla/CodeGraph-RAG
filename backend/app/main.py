@@ -23,10 +23,6 @@ from backend.app.api.keys import router as keys_router
 async def lifespan(app: FastAPI):
     # Initialize database tables on startup
     init_db()
-    # Pre-warm vector store and SentenceTransformer in background thread so user never waits on cold start
-    import threading
-    from backend.app.services.registry import get_vector_store
-    threading.Thread(target=get_vector_store, daemon=True, name="prewarm_vector_store").start()
     yield
 
 
