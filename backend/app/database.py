@@ -21,6 +21,8 @@ if db_url.startswith("sqlite"):
 else:
     # Recommended for Neon / cloud PostgreSQL with connection pooling
     engine_kwargs["pool_recycle"] = 300
+    engine_kwargs["pool_size"] = 5
+    engine_kwargs["max_overflow"] = 2
 
 try:
     engine = create_engine(db_url, **engine_kwargs)

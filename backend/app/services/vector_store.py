@@ -4,7 +4,6 @@ import atexit
 from typing import List, Dict, Any, Tuple, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
-from sentence_transformers import SentenceTransformer
 from backend.app.config import settings
 
 DEFAULT_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
@@ -59,17 +58,29 @@ class CodeVectorStore:
 
     @property
     def model(self):
-        """Lazy loads the embedding model with CPU single-threading to fit well within 512MB RAM."""
+        """Lazy loads lightweight FastEmbed (ONNX) or falls back to SentenceTransformer."""
         if self._model is None:
-            self.log(f"🎯 Loading embedding model '{self.model_name}' on demand...")
+            # 1. Try FastEmbed (Lightweight ONNX CPU, ~60MB RAM)
+            try:
+                from fastembed import TextEmbedding
+                self.log(f"🎯 Loading lightweight FastEmbed model '{self.model_name}'...")
+                self._model = TextEmbedding(model_name=self.model_name)
+                self.vector_size = 384
+                self.log("✅ FastEmbed ONNX model ready (~60MB RAM).")
+                return self._model
+            except Exception as fe_err:
+                self.log(f"⚠️ FastEmbed notice: {fe_err}. Trying SentenceTransformer fallback...")
+
+            # 2. Fallback to SentenceTransformer
             try:
                 import torch
                 torch.set_num_threads(1)
+                from sentence_transformers import SentenceTransformer
                 self._model = SentenceTransformer(self.model_name)
                 self.vector_size = self._model.get_sentence_embedding_dimension()
-                self.log(f"✅ Local model loaded successfully ({self.vector_size} dims).")
+                self.log(f"✅ SentenceTransformer model loaded ({self.vector_size} dims).")
             except Exception as e:
-                self.log(f"⚠️ Failed to load local embedding model '{self.model_name}': {e}")
+                self.log(f"⚠️ Failed to load embedding model '{self.model_name}': {e}")
                 self._model = None
         return self._model
 
@@ -120,25 +131,39 @@ class CodeVectorStore:
             self.log(f"⚠️ Error resetting collection: {e}")
 
     def generate_embedding(self, text: str) -> List[float]:
-        """Generates a dense vector embedding for a single code snippet using local CPU inference."""
-        if not text or not text.strip() or not self.model:
+        """Generates a dense vector embedding using FastEmbed (or SentenceTransformer)."""
+        if not text or not text.strip():
+            return [0.0] * self.vector_size
+        embedder = self.model
+        if not embedder:
             return [0.0] * self.vector_size
         try:
-            vector = self.model.encode(text, convert_to_numpy=True)
-            return vector.tolist()
+            if hasattr(embedder, "embed"):
+                vectors = list(embedder.embed([text]))
+                return vectors[0].tolist() if vectors else [0.0] * self.vector_size
+            else:
+                vector = embedder.encode(text, convert_to_numpy=True)
+                return vector.tolist()
         except Exception as e:
-            self.log(f"⚠️ Local Embedding Error: {e}")
+            self.log(f"⚠️ Embedding generation error: {e}")
             return [0.0] * self.vector_size
 
     def generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
         """Generates dense vector embeddings for a list of text snippets in batch."""
-        if not texts or not self.model:
+        if not texts:
+            return []
+        embedder = self.model
+        if not embedder:
             return [[0.0] * self.vector_size for _ in texts]
         try:
-            vectors = self.model.encode(texts, convert_to_numpy=True, batch_size=32, show_progress_bar=False)
-            return vectors.tolist()
+            if hasattr(embedder, "embed"):
+                vectors = list(embedder.embed(texts, batch_size=32))
+                return [v.tolist() for v in vectors]
+            else:
+                vectors = embedder.encode(texts, convert_to_numpy=True, batch_size=32, show_progress_bar=False)
+                return vectors.tolist()
         except Exception as e:
-            self.log(f"⚠️ Batch Local Embedding Error: {e}")
+            self.log(f"⚠️ Batch embedding generation error: {e}")
             return [[0.0] * self.vector_size for _ in texts]
 
     def upsert_code_snippet(self, doc_id: int, code_snippet: str, metadata: Dict[str, Any]) -> bool:
