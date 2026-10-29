@@ -9,16 +9,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Build context is the repo root (see docker-compose.yml) so the `backend`
-# package keeps its name and `backend.app...` imports resolve.
-COPY backend/requirements.txt ./requirements.txt
+# Copy requirements and install
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY backend ./backend
+# Copy backend source code so both `backend.app...` and `app...` import paths resolve
+COPY . /app/backend/
+RUN cp -r /app/backend/app /app/app
 
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/app/backend
 ENV PORT=8000
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
