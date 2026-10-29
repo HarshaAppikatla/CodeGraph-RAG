@@ -114,6 +114,14 @@ class CodeVectorStore:
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
                 )
+            try:
+                self.qdrant.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name="workspace_id",
+                    field_schema="keyword",
+                )
+            except Exception:
+                pass
         except Exception as e:
             self.log(f"⚠️ Qdrant collection initialization notice: {e}")
 
@@ -126,6 +134,14 @@ class CodeVectorStore:
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
             )
+            try:
+                self.qdrant.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name="workspace_id",
+                    field_schema="keyword",
+                )
+            except Exception:
+                pass
             self.log(f"🧹 Cleaned stale vector embeddings in Qdrant collection '{self.collection_name}'.")
         except Exception as e:
             self.log(f"⚠️ Error resetting collection: {e}")

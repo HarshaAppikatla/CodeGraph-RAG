@@ -231,7 +231,7 @@ class Neo4jGraphStore:
 
         cypher_query = f"""
         MATCH (target) WHERE (target.name = $symbol OR target.short_name = $symbol OR target.name ENDS WITH ('.' + $symbol))
-          AND ($ws IS NULL OR target.ws = $ws OR target.workspace_id = $ws)
+          AND ($ws IS NULL OR target.ws = $ws)
 
         // 1. Fetch Interface & Class Hierarchy (Upstream & Downstream)
         OPTIONAL MATCH (target)-[:EXTENDS|IMPLEMENTS*1..2]->(parent)
@@ -241,7 +241,10 @@ class Neo4jGraphStore:
         OPTIONAL MATCH (caller)-[:CALLS*1..{safe_hops}]->(target)
         OPTIONAL MATCH (child_caller)-[:CALLS*1..{safe_hops}]->(child)
 
-        // 3. File containing target
+        // 3. Fetch Downstream Callees that target invokes
+        OPTIONAL MATCH (target)-[:CALLS]->(callee)
+
+        // 4. File containing target
         OPTIONAL MATCH (f:File)-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
 
         RETURN 
@@ -251,7 +254,8 @@ class Neo4jGraphStore:
             collect(DISTINCT parent) as parents,
             collect(DISTINCT child) as children,
             collect(DISTINCT caller) as direct_callers,
-            collect(DISTINCT child_caller) as child_callers
+            collect(DISTINCT child_caller) as child_callers,
+            collect(DISTINCT callee)[0..15] as callees
         """
 
         try:
@@ -378,6 +382,28 @@ class Neo4jGraphStore:
                     })
                     edges.append({"from": cc_id, "to": "target", "label": "[:CALLS]", "hop": "Polymorphic"})
 
+                # Process Downstream Callees (invoked symbols)
+                callees = [c for c in (record.get("callees") or []) if c]
+                seen_callee_names = set()
+                for i, c_node in enumerate(callees):
+                    c_name = (c_node.get("name") if hasattr(c_node, "get") else str(c_node)) or f"Callee_{i}"
+                    if c_name in seen_callee_names or c_name in seen_caller_names or c_name == target_name:
+                        continue
+                    seen_callee_names.add(c_name)
+                    c_file = (c_node.get("file") if hasattr(c_node, "get") else "Unknown") or "Unknown"
+                    c_id = f"callee_{i}"
+                    nodes.append({
+                        "id": c_id,
+                        "label": c_name,
+                        "file": c_file.replace("\\", "/").split("/")[-1],
+                        "full_path": c_file,
+                        "type": "CALLEE",
+                        "scope": f"Invoked Callee ({c_file.replace('\\', '/').split('/')[-1]})",
+                        "x": 260 + (len(seen_callee_names) * 110),
+                        "y": 420,
+                    })
+                    edges.append({"from": "target", "to": c_id, "label": "[:CALLS]", "hop": "Downstream"})
+
                 all_callers_count = len(seen_caller_names)
                 blast_score = round(min(10.0, 1.5 + (all_callers_count * 1.2) + (len(children) * 1.5)), 1)
                 risk_level = "HIGH" if blast_score >= 6.5 else "MEDIUM" if blast_score >= 3.5 else "LOW"
@@ -481,6 +507,28 @@ class Neo4jGraphStore:
         except Exception as e:
             default_res["message"] = f"Impact Analysis Cypher execution failed: {e}"
             return default_res
+
+    def list_symbols(self, workspace_id: Optional[str] = None, limit: int = 300) -> List[Dict[str, str]]:
+        """Distinct class/function names indexed in the Neo4j AST for one workspace, with their file."""
+        if not self.driver:
+            return []
+        cypher = """
+        MATCH (n) 
+        WHERE (n.ws = $ws OR $ws IS NULL) 
+          AND (n:Function OR n:Class) 
+          AND n.file IS NOT NULL 
+          AND NOT n.name STARTS WITH '('
+        RETURN DISTINCT n.name as name, n.file as file, head(labels(n)) as type
+        ORDER BY n.name 
+        LIMIT $limit
+        """
+        try:
+            with self.driver.session() as session:
+                records = session.run(cypher, ws=workspace_id, limit=limit).data()
+                return [{"name": r["name"], "file": r["file"] or "", "type": r.get("type", "Function")} for r in records]
+        except Exception as e:
+            self.log(f"⚠️ Neo4j symbol listing error: {e}")
+            return []
 
     def get_file_graph(self, filepath: str, workspace_id: Optional[str] = None) -> Dict[str, Any]:
         """Retrieves structural nodes and edges for a specific file."""

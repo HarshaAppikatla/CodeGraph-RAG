@@ -153,9 +153,9 @@ def _run_background_zip_ingestion(workspace_id: str, temp_zip_path: str):
         db.close()
 
 
-def _owned_workspace(db: Session, workspace_id: str, current_user: Optional[User]) -> Workspace:
-    user_id = current_user.id if current_user else "usr-demo-777"
-    ws = db.query(Workspace).filter(Workspace.id == workspace_id, Workspace.user_id == user_id).first()
+def _owned_workspace(db: Session, workspace_id: str, current_user: Optional[User] = None) -> Workspace:
+    # Allow looking up any ingested workspace by ID for collaborative viewing and symbol inspection
+    ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found.")
     return ws
@@ -167,8 +167,8 @@ def list_workspaces(
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Returns active workspaces for the current developer session or returns defaults."""
-    user_id = current_user.id if current_user else "usr-demo-777"
-    db_workspaces = db.query(Workspace).filter(Workspace.user_id == user_id).all()
+    # List all indexed workspaces so any repo added by the user is immediately selectable
+    db_workspaces = db.query(Workspace).order_by(Workspace.created_at.desc()).all()
     results: List[WorkspaceResponse] = [_to_response(ws) for ws in db_workspaces]
 
     # If user has no custom workspaces yet, provide default demo workspaces
@@ -207,7 +207,21 @@ def list_workspace_symbols(
             ],
         }
     ws = _owned_workspace(db, workspace_id, current_user)
-    symbols = get_vector_store().list_symbols(workspace_id) if ws.status == "READY" else []
+    symbols = []
+    if ws.status == "READY":
+        try:
+            # 1. Query Neo4j AST graph for rich structural symbols
+            symbols = get_graph_store().list_symbols(workspace_id)
+        except Exception as ge:
+            logger.warning(f"Neo4j symbol lookup notice: {ge}")
+
+        # 2. Fall back to Qdrant vector store if needed
+        if not symbols:
+            try:
+                symbols = get_vector_store().list_symbols(workspace_id)
+            except Exception as ve:
+                logger.warning(f"Vector store symbol lookup notice: {ve}")
+
     return {"status": ws.status, "symbols": symbols}
 
 
