@@ -230,3 +230,5 @@ qdrant_data/
 
 # Git patch files
 *.patch
+.neon
+node_modules/

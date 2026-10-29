@@ -45,6 +45,16 @@ def get_db():
 
 def init_db():
     """Initializes schema tables on startup and migrates columns if needed."""
+    try:
+        from backend.app.models.user import User  # noqa: F401
+        from backend.app.models.workspace import Workspace  # noqa: F401
+    except ImportError:
+        try:
+            from app.models.user import User  # noqa: F401
+            from app.models.workspace import Workspace  # noqa: F401
+        except ImportError:
+            pass
+
     Base.metadata.create_all(bind=engine)
     try:
         with engine.connect() as conn:
