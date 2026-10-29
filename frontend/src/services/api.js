@@ -1,4 +1,11 @@
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
+  ? import.meta.env.VITE_API_BASE_URL.replace(/\/$/, '')
+  : '';
+
+export const getApiUrl = (endpoint) => {
+  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  return `${API_BASE_URL}${cleanEndpoint}`;
+};
 const TOKEN_KEY = 'codegraph_token';
 
 // FastAPI returns `detail` as a string (HTTPException) or a list (422 validation errors).
@@ -23,9 +30,9 @@ async function request(path, { method = 'GET', json, form } = {}) {
 
   let res;
   try {
-    res = await fetch(`${BASE_URL}${path}`, { method, headers, body });
+    res = await fetch(getApiUrl(path), { method, headers, body });
   } catch {
-    throw new Error(`Cannot reach the backend at ${BASE_URL}. Is it running?`);
+    throw new Error(`Cannot reach the backend at ${API_BASE_URL || 'local server'}. Is it running?`);
   }
 
   const data = await res.json().catch(() => null);
@@ -80,6 +87,7 @@ export const getDiscoveredModels = async () => {
 };
 
 export const api = {
+  getApiUrl,
   // Multi-Provider Key Vault Operations
   saveApiKey: (provider, key) =>
     request('/api/keys/save', { method: 'POST', json: { provider, api_key: key } }),

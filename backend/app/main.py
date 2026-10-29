@@ -1,7 +1,16 @@
 import os
+import sys
+from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Ensure monorepo root and backend root are in sys.path for flexible execution
+backend_dir = Path(__file__).resolve().parent.parent
+monorepo_root = backend_dir.parent
+for p in [str(monorepo_root), str(backend_dir)]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from backend.app.database import init_db
 from backend.app.api.auth import router as auth_router
@@ -28,20 +37,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Production CORS Hardening
-ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
-custom_origins = os.getenv("ALLOWED_ORIGINS")
-if custom_origins:
-    ALLOWED_ORIGINS.extend([origin.strip() for origin in custom_origins.split(",") if origin.strip()])
+# Parse CORS origins from environment variable or set safe defaults
+raw_origins = os.getenv("CORS_ORIGINS", os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://127.0.0.1:3000"))
+allowed_origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
+# Add wildcard support for Vercel preview URLs
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,3 +76,10 @@ def health_check():
         "database": "connected",
         "mcp_protocol": "supported",
     }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    host = os.getenv("HOST", "0.0.0.0")
+    uvicorn.run("backend.app.main:app" if "backend" in sys.modules else "app.main:app", host=host, port=port, reload=False)

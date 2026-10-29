@@ -1,3 +1,4 @@
+import os
 import sys
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -5,19 +6,30 @@ from backend.app.config import settings
 
 Base = declarative_base()
 
-# Attempt primary database connection; fall back to local SQLite if PostgreSQL is unreachable
-database_url = settings.DATABASE_URL
-connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {"connect_timeout": 1}
+# 1. Resolve and normalize database URL
+db_url = os.getenv("DATABASE_URL", getattr(settings, "DATABASE_URL", "sqlite:///./codegraph.db"))
+
+# Fix legacy Heroku/Render Postgres URL prefixes for SQLAlchemy
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+engine_kwargs = {"pool_pre_ping": True}
+if db_url.startswith("sqlite"):
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+else:
+    # Recommended for Neon / cloud PostgreSQL with connection pooling
+    engine_kwargs["pool_recycle"] = 300
 
 try:
-    engine = create_engine(database_url, connect_args=connect_args, pool_pre_ping=True)
+    engine = create_engine(db_url, **engine_kwargs)
     with engine.connect() as conn:
         pass
 except Exception as e:
-    sys.stderr.write(f"⚠️ Primary DATABASE_URL ({database_url}) connection failed: {e}\n")
-    sys.stderr.write("🔄 Falling back to SQLite ('sqlite:///./codegraph.db') for seamless local development.\n")
-    database_url = "sqlite:///./codegraph.db"
-    engine = create_engine(database_url, connect_args={"check_same_thread": False})
+    sys.stderr.write(f"⚠️ Primary DATABASE_URL ({db_url}) connection notice: {e}\n")
+    if not db_url.startswith("sqlite"):
+        sys.stderr.write("🔄 Falling back to SQLite ('sqlite:///./codegraph.db') for local resilience.\n")
+        db_url = "sqlite:///./codegraph.db"
+        engine = create_engine(db_url, connect_args={"check_same_thread": False})
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

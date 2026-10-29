@@ -33,7 +33,7 @@ class Neo4jGraphStore:
             self.driver = GraphDatabase.driver(
                 self.uri,
                 auth=(self.user, self.password),
-                connection_timeout=2.0
+                connection_timeout=15.0
             )
             self.driver.verify_connectivity()
             self.log("✅ Connected to Neo4j Graph Database.")

@@ -11,8 +11,11 @@ class Settings(BaseSettings):
     NEO4J_USERNAME: str = "neo4j"
     NEO4J_USER: Optional[str] = None
     NEO4J_PASSWORD: str = "password"
-    QDRANT_HOST: str = "localhost"
+    QDRANT_HOST: Optional[str] = None
     QDRANT_PORT: int = 6333
+    QDRANT_API_KEY: Optional[str] = None
+    QDRANT_PATH: Optional[str] = None
+    CORS_ORIGINS: Optional[str] = None
     JWT_SECRET: str = "codegraph-rag-secret-key-2026-production-v2"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440

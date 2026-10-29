@@ -34,12 +34,31 @@ class CodeVectorStore:
             self.model = None
             self.vector_size = 384
 
-        # 2. Initialize Qdrant Client (prefer local file storage for zero external dependencies)
-        try:
-            self.qdrant = QdrantClient(path=self.qdrant_path)
-        except Exception as e:
-            self.log(f"⚠️ Notice on local Qdrant file store ({e}), trying memory client...")
-            self.qdrant = QdrantClient(":memory:")
+        # 2. Initialize Qdrant Client (Cloud or local embedded storage)
+        qdrant_host = os.getenv("QDRANT_HOST")
+        qdrant_api_key = os.getenv("QDRANT_API_KEY")
+
+        if qdrant_host and qdrant_host.startswith("http"):
+            # Qdrant Cloud Instance
+            self.log(f"☁️ Connecting to Qdrant Cloud at {qdrant_host}...")
+            try:
+                self.qdrant = QdrantClient(
+                    url=qdrant_host,
+                    api_key=qdrant_api_key if qdrant_api_key else None,
+                    timeout=10.0,
+                )
+                self.log("✅ Qdrant Cloud connected successfully.")
+            except Exception as e:
+                self.log(f"⚠️ Failed connecting to Qdrant Cloud ({e}), trying memory client...")
+                self.qdrant = QdrantClient(":memory:")
+        else:
+            # Local Embedded Persistent Storage
+            local_path = os.getenv("QDRANT_PATH", self.qdrant_path)
+            try:
+                self.qdrant = QdrantClient(path=local_path)
+            except Exception as e:
+                self.log(f"⚠️ Notice on local Qdrant file store ({e}), trying memory client...")
+                self.qdrant = QdrantClient(":memory:")
 
         self.client = self.qdrant
         atexit.register(self._safe_close)
@@ -220,7 +239,6 @@ class CodeVectorStore:
     def search(self, query: str, top_k: int = 5, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Alias interface supporting callers expecting search(query, top_k)."""
         return self.search_similar_code(query=query, limit=top_k, workspace_id=workspace_id)
-
 
     def list_symbols(self, workspace_id: str, limit: int = 300) -> List[Dict[str, str]]:
         """Distinct class/function names indexed for one workspace, with their file."""
