@@ -561,14 +561,32 @@ def get_architecture_graph(req: ArchitectureGraphRequest):
 # ---------------------------------------------------------------------------
 
 
-def _demo_answer(query: str, model_alias: str = "groq/llama-3.3-70b-versatile", execution_time: float = 0.04) -> Dict[str, Any]:
-    text = (
-        f"Based on Neo4j Graph Traversal & Qdrant Chunk Analysis for: '{query}':\n\n"
-        "1. Target Scope Identified: JwtService.java & AuthenticationService.java\n"
-        "2. Direct Dependent Services: AuthenticationService.java invokes token generation inside both authenticate() (line 52) and register() (line 89).\n"
-        "3. Public HTTP Controllers: AuthenticationController.java relies on this payload via /api/auth/authenticate.\n\n"
-        "Architectural Guidance: Maintain backward compatibility by keeping overloads when modifying core method signatures."
-    )
+def _demo_answer(query: str, model_alias: str = "gemini-2.0-flash", execution_time: float = 0.04) -> Dict[str, Any]:
+    q_lower = query.lower()
+    is_code_query = any(k in q_lower for k in [
+        "token", "jwt", "auth", "login", "register", "service", "blast", "radius",
+        "method", "class", "caller", "code", "syntax", "refactor", "studysync", "spring"
+    ])
+
+    if is_code_query:
+        text = (
+            f"Based on Neo4j Graph Traversal & Qdrant Chunk Analysis for '{query}':\n\n"
+            "• Target Scope Identified: JwtService.java & AuthenticationService.java\n"
+            "• Direct Dependent Services: AuthenticationService.java invokes token generation inside both authenticate() (line 52) and register() (line 89).\n"
+            "• Public HTTP Controllers: AuthenticationController.java relies on this payload via /api/auth/authenticate.\n\n"
+            "💡 Note: To run unconstrained live AI queries, enter your Gemini or Groq API key in the Key Vault (🔑) in the top toolbar."
+        )
+    else:
+        text = (
+            f"⚠️ **Live AI Key Required**\n\n"
+            f"You asked: *\"{query}\"\n\n"
+            "CodeGraph is running in **Demo Mode** with mock responses because no LLM API key is configured.\n\n"
+            "To chat with real AI models (Gemini 2.0 Flash, Groq LLaMA 3.3, Claude, etc.):\n"
+            "1. Click the **Key Vault (🔑 Key icon)** in the top navigation bar.\n"
+            "2. Paste your free **Gemini API Key** (from https://aistudio.google.com/app/apikey) or Groq key.\n"
+            "3. Click **Save** and retry your question!"
+        )
+
     return {
         "answer": text,
         "response": text,
@@ -577,7 +595,7 @@ def _demo_answer(query: str, model_alias: str = "groq/llama-3.3-70b-versatile", 
         "sources": [
             "studysync-backend/src/main/java/com/studysync/studysyncbackend/service/JwtService.java",
             "studysync-backend/src/main/java/com/studysync/studysyncbackend/service/AuthenticationService.java",
-        ],
+        ] if is_code_query else [],
         "telemetry": {
             "model": model_alias,
             "demo_fallback": True,

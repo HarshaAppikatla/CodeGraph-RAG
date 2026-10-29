@@ -101,6 +101,8 @@ def _finish_ingestion(db: Session, ws: Workspace, res: dict) -> None:
     else:
         summary = res.get("indexing_summary", {})
         ws.status = "READY"
+        if res.get("branch"):
+            ws.branch = res["branch"]
         ws.files_count = res.get("total_files", 0)
         ws.nodes_count = summary.get("graph_nodes", 0)
         ws.edges_count = summary.get("graph_edges", 0)

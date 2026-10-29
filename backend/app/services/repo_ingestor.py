@@ -161,28 +161,75 @@ class RepositoryIngestor:
     def ingest_git_repo(
         self, repo_url: str, branch: Optional[str] = None, workspace_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Clones a remote Git repository into a temporary directory and indexes it."""
-        self.log(f"📥 Cloning remote Git repository: {repo_url}")
+        """Clones a remote Git repository into a temporary directory and indexes it with resilient branch fallbacks."""
+        clean_url = repo_url.strip()
+        self.log(f"📥 Cloning remote Git repository: {clean_url} (requested branch: {branch})")
         temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
         try:
-            clone_cmd = ["git", "clone", "--depth", "1"]
-            if branch:
-                clone_cmd.extend(["-b", branch])
-            clone_cmd.extend([repo_url, temp_dir])
-            subprocess.run(clone_cmd, capture_output=True, text=True, check=True)
+            cloned = False
+            err_msg = ""
+
+            # 1. Attempt clone with specified branch (if provided)
+            if branch and branch.strip():
+                clone_cmd = ["git", "clone", "--depth", "1", "-b", branch.strip(), clean_url, temp_dir]
+                res = subprocess.run(clone_cmd, capture_output=True, text=True)
+                if res.returncode == 0:
+                    cloned = True
+                else:
+                    err_msg = res.stderr.strip()
+                    self.log(f"⚠️ Branch '{branch}' clone notice: {err_msg}. Retrying remote default branch...")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
+
+            # 2. Fallback: clone without branch specifier (clones remote default branch, e.g. master/main)
+            if not cloned:
+                fallback_cmd = ["git", "clone", "--depth", "1", clean_url, temp_dir]
+                res2 = subprocess.run(fallback_cmd, capture_output=True, text=True)
+                if res2.returncode == 0:
+                    cloned = True
+                else:
+                    err_msg = res2.stderr.strip() or err_msg
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
+
+            # 3. Final fallback: explicitly try 'master' if requested branch was 'main'
+            if not cloned and branch != "master":
+                master_cmd = ["git", "clone", "--depth", "1", "-b", "master", clean_url, temp_dir]
+                res3 = subprocess.run(master_cmd, capture_output=True, text=True)
+                if res3.returncode == 0:
+                    cloned = True
+                else:
+                    err_msg = res3.stderr.strip() or err_msg
+
+            if not cloned:
+                self.log(f"❌ Git clone error: {err_msg}")
+                return {"status": "error", "message": f"Git clone failed: {err_msg}"}
+
+            # Detect actual cloned branch
+            actual_branch = branch or "main"
+            try:
+                head_check = subprocess.run(
+                    ["git", "-C", temp_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True
+                )
+                if head_check.returncode == 0 and head_check.stdout.strip():
+                    actual_branch = head_check.stdout.strip()
+            except Exception:
+                pass
+
             source_files = self.collect_source_files(temp_dir)
-            self.log(f"✅ Found {len(source_files)} source files for indexing.")
+            self.log(f"✅ Found {len(source_files)} source files for indexing on branch '{actual_branch}'.")
             indexing_summary = self._index_files(temp_dir, source_files, workspace_id)
             return {
                 "status": "success",
-                "source": repo_url,
+                "source": clean_url,
+                "branch": actual_branch,
                 "total_files": len(source_files),
                 "indexing_summary": indexing_summary,
             }
-        except subprocess.CalledProcessError as e:
-            err_msg = e.stderr.strip() if e.stderr else str(e)
-            self.log(f"❌ Git clone error: {err_msg}")
-            return {"status": "error", "message": f"Git clone failed: {err_msg}"}
+        except Exception as e:
+            self.log(f"❌ Unexpected git ingestion error: {e}")
+            return {"status": "error", "message": f"Git ingestion failed: {e}"}
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
