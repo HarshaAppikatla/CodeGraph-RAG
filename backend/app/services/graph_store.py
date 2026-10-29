@@ -529,7 +529,7 @@ class Neo4jGraphStore:
             return {"error": f"Failed to retrieve file graph for '{filepath}': {e}"}
 
     def get_workspace_architecture_graph(
-        self, workspace_id: Optional[str] = None, limit: int = 250
+        self, workspace_id: Optional[str] = None, limit: int = 350
     ) -> Dict[str, Any]:
         """
         Retrieves the unified architecture graph of all nodes connected by different relations:
@@ -542,9 +542,9 @@ class Neo4jGraphStore:
         if not self.driver:
             return {"connected": False, "nodes": [], "edges": [], "message": "Neo4j driver not connected."}
 
+        # Query explicit relationships first to ensure full connectivity and typed edges
         cypher = """
-        MATCH (n) WHERE ($ws IS NULL OR n.ws = $ws OR n.workspace_id = $ws)
-        OPTIONAL MATCH (n)-[r]->(m) WHERE ($ws IS NULL OR m.ws = $ws OR m.workspace_id = $ws)
+        MATCH (n)-[r]->(m) WHERE ($ws IS NULL OR n.ws = $ws)
         RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
         LIMIT $limit
         """
@@ -567,7 +567,8 @@ class Neo4jGraphStore:
                         raw_id = (
                             (node_obj.get("name") if hasattr(node_obj, "get") else None)
                             or (node_obj.get("path") if hasattr(node_obj, "get") else None)
-                            or str(getattr(node_obj, "id", ""))
+                            or (node_obj.get("code") if hasattr(node_obj, "get") else None)
+                            or str(getattr(node_obj, "element_id", getattr(node_obj, "id", "")))
                         )
                         if not raw_id:
                             return None
@@ -577,9 +578,11 @@ class Neo4jGraphStore:
                         is_class = "Class" in labels_set or (raw_id[:1].isupper() and "." not in raw_id and not is_file)
                         is_iface = "interface" in raw_id.lower() or "Repository" in raw_id or "Details" in raw_id
                         is_method = "Function" in labels_set or "." in raw_id
+                        is_import = "Import" in labels_set or raw_id.startswith("import ") or raw_id.startswith("from ")
 
                         node_type = (
                             "FILE" if is_file
+                            else "IMPORT" if is_import
                             else "INTERFACE" if is_iface
                             else "CLASS" if is_class
                             else "METHOD" if is_method
@@ -607,13 +610,24 @@ class Neo4jGraphStore:
                     if node_m and node_m["id"] not in nodes_map:
                         nodes_map[node_m["id"]] = node_m
 
-                    if node_n and node_m and r:
+                    if node_n and node_m and r is not None:
                         edges.append({
                             "from": node_n["id"],
                             "to": node_m["id"],
                             "label": f"[:{r_type}]",
                             "relationType": r_type.replace("CONTAINS_CLASS", "CONTAINS").replace("CONTAINS_FUNCTION", "CONTAINS"),
                         })
+
+                if not nodes_map:
+                    # Fallback to isolated nodes if no relationships exist
+                    fallback_records = list(session.run(
+                        "MATCH (n) WHERE ($ws IS NULL OR n.ws = $ws) RETURN n, labels(n) as n_labels LIMIT $limit",
+                        ws=workspace_id, limit=limit
+                    ))
+                    for rec in fallback_records:
+                        node_n = _extract_node(rec.get("n"), rec.get("n_labels"))
+                        if node_n and node_n["id"] not in nodes_map:
+                            nodes_map[node_n["id"]] = node_n
 
                 if not nodes_map:
                     return {"connected": False, "nodes": [], "edges": [], "message": "No nodes found in Neo4j."}
@@ -625,6 +639,10 @@ class Neo4jGraphStore:
                     "stats": {
                         "totalNodes": len(nodes_map),
                         "totalEdges": len(edges),
+                        "classes": len([n for n in nodes_map.values() if n.get("type") == "CLASS"]),
+                        "interfaces": len([n for n in nodes_map.values() if n.get("type") == "INTERFACE"]),
+                        "methods": len([n for n in nodes_map.values() if n.get("type") == "METHOD"]),
+                        "files": len([n for n in nodes_map.values() if n.get("type") == "FILE"]),
                     }
                 }
         except Exception as e:
