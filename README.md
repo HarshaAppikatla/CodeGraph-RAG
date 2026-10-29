@@ -8,7 +8,7 @@
 <br/>
 
 [![Watch 2-Min Demo](https://img.shields.io/badge/%E2%96%B6_Watch_2--Min_Video_Demo-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://youtube.com)
-[![Live Interactive App](https://img.shields.io/badge/%F0%9F%8C%90_Live_Interactive_Demo-2563EB?style=for-the-badge&logo=googlechrome&logoColor=white)](https://your-live-demo-url.com)
+[![Live Interactive App](https://img.shields.io/badge/%F0%9F%8C%90_Live_Interactive_Demo-2563EB?style=for-the-badge&logo=googlechrome&logoColor=white)](https://code-graph-rag-ten.vercel.app)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/appikatlaharshavardhan/)
 
 <br/>
