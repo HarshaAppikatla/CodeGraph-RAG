@@ -187,7 +187,7 @@ export default function KeyVaultModal({
   const handleTest = async (providerId) => {
     const inputVal = (keyInputs[providerId] || '').trim();
     setIsTesting(true);
-    setStatusMessage({ text: `Testing connection to ${providerId.toUpperCase()}...`, type: 'info' });
+    setStatusMessage({ text: `Testing connection to ${providerId.toUpperCase()} (connecting to backend)...`, type: 'info' });
 
     try {
       const res = await api.testApiKey(providerId, inputVal || undefined);

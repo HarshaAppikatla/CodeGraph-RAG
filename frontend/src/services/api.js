@@ -16,8 +16,8 @@ const formatDetail = (detail) => {
   return JSON.stringify(detail);
 };
 
-// Single entry point: attaches the token, picks the body encoding, and throws on any failure.
-async function request(path, { method = 'GET', json, form } = {}) {
+// Single entry point: attaches the token, picks the body encoding, handles cold-start retries, and throws on any failure.
+async function request(path, { method = 'GET', json, form, retries = 2 } = {}) {
   const token = localStorage.getItem(TOKEN_KEY);
   const headers = token ? { Authorization: `Bearer ${token}` } : {};
   let body;
@@ -29,10 +29,29 @@ async function request(path, { method = 'GET', json, form } = {}) {
   }
 
   let res;
-  try {
-    res = await fetch(getApiUrl(path), { method, headers, body });
-  } catch {
-    throw new Error(`Cannot reach the backend at ${API_BASE_URL || 'local server'}. Is it running?`);
+  let lastNetworkError = false;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      res = await fetch(getApiUrl(path), { method, headers, body });
+      // If Render is waking up (502 or 503 from edge proxy during spin-up), retry after delay
+      if ((res.status === 502 || res.status === 503) && attempt < retries) {
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+        continue;
+      }
+      lastNetworkError = false;
+      break;
+    } catch {
+      lastNetworkError = true;
+      if (attempt < retries) {
+        // Wait and retry in case Render free tier is waking up
+        await new Promise((r) => setTimeout(r, 2500 * (attempt + 1)));
+      }
+    }
+  }
+
+  if (lastNetworkError || !res) {
+    throw new Error(`Cannot reach backend at ${API_BASE_URL || 'local server'}. If the server was sleeping (Render free tier), it takes ~35s to spin up. Please retry in a moment.`);
   }
 
   const data = await res.json().catch(() => null);
@@ -88,6 +107,7 @@ export const getDiscoveredModels = async () => {
 
 export const api = {
   getApiUrl,
+  checkHealth: () => request('/health'),
   // Multi-Provider Key Vault Operations
   saveApiKey: (provider, key) =>
     request('/api/keys/save', { method: 'POST', json: { provider, api_key: key } }),

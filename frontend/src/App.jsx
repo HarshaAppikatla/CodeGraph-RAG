@@ -306,8 +306,9 @@ export default function App() {
     setTimeout(() => setCopiedText(null), 2000);
   };
 
-  // Cleanup ingestion polling intervals on component unmount
+  // Wake up backend (e.g. Render free tier) on page load & cleanup ingestion polling on unmount
   useEffect(() => {
+    api.checkHealth?.().catch(() => {});
     return () => {
       ingestTimers.current.forEach(clearInterval);
       ingestTimers.current = [];
