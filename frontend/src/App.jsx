@@ -212,13 +212,13 @@ export default function App() {
   // Application Screen State
   const [currentScreen, setCurrentScreen] = useState('AUTH');
 
-  // Workspaces List
-  const [workspaces, setWorkspaces] = useState(INITIAL_WORKSPACES);
-  const [selectedWorkspace, setSelectedWorkspace] = useState(INITIAL_WORKSPACES[0]);
+  // Workspaces List (Clean empty default for users; populated for demo account)
+  const [workspaces, setWorkspaces] = useState([]);
+  const [selectedWorkspace, setSelectedWorkspace] = useState(null);
 
   // Workspace Creation Form
   const [uploadType, setUploadType] = useState('git');
-  const [gitRepoInput, setGitRepoInput] = useState('https://github.com/HarshaAppikatla/Study-Sync');
+  const [gitRepoInput, setGitRepoInput] = useState('');
   const [zipFileName, setZipFileName] = useState('');
   const [zipFile, setZipFile] = useState(null);
   const [folderFiles, setFolderFiles] = useState(null);
@@ -279,18 +279,18 @@ export default function App() {
   };
 
   // AI & QA Assistant State
-  const [qaInput, setQaInput] = useState('Explain the token authentication workflow and blast radius if generateToken is changed.');
+  const [qaInput, setQaInput] = useState('');
   const [qaMessages, setQaMessages] = useState([
     {
       sender: 'assistant',
-      text: 'Hello! I am your CodeGraph-RAG Architectural AI. I have indexed Study-Sync into Qdrant vector store (384D) and Neo4j call graph (2,533 nodes). Ask me anything about symbol dependencies or architectural impact!',
-      sources: ['JwtService.java', 'AuthenticationService.java']
+      text: 'Hello! I am your CodeGraph-RAG Architectural AI. Select or ingest a codebase to search symbols, inspect dependencies, and generate verified refactors.',
+      sources: []
     }
   ]);
   const [isAiThinking, setIsAiThinking] = useState(false);
 
   // Refactor Sandbox State
-  const [refactorPrompt, setRefactorPrompt] = useState('Update JwtService.generateToken signature to accept explicit Claims map and set token expiration to 24 hours.');
+  const [refactorPrompt, setRefactorPrompt] = useState('');
   const [followUpPrompt, setFollowUpPrompt] = useState('');
   const [generatedDiff, setGeneratedDiff] = useState(null);
   const [refactorHistory, setRefactorHistory] = useState([]);
@@ -318,7 +318,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedWorkspace?.id) return;
     let isCanceled = false;
-    const isDemo = selectedWorkspace.id.startsWith('ws-');
+    const isDemo = Boolean(selectedWorkspace.id.startsWith('ws-') && currentUser?.isDemo);
 
     // Reset local graph and symbol states on workspace switch to avoid stale rendering
     setLiveGraphData(null);
@@ -391,7 +391,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedWorkspace || !selectedSymbolKey) return;
     let isCanceled = false;
-    const isDemo = selectedWorkspace.id.startsWith('ws-');
+    const isDemo = Boolean(selectedWorkspace.id.startsWith('ws-') && currentUser?.isDemo);
     if (!isDemo && selectedSymbolKey === 'generateToken') return;
 
     api.getSymbolImpact(selectedWorkspace.id, selectedSymbolKey)
@@ -439,15 +439,31 @@ export default function App() {
       setAuthEmail(res.user.email);
       setAuthPassword('demopassword2026');
 
-      // Fetch dynamic workspaces from backend
+      // Pre-load demo repository input and demo prompts
+      setGitRepoInput('https://github.com/HarshaAppikatla/Study-Sync');
+      setRefactorPrompt('Update JwtService.generateToken signature to accept explicit Claims map and set token expiration to 24 hours.');
+      setQaMessages([
+        {
+          sender: 'assistant',
+          text: 'Hello! I am your CodeGraph-RAG Architectural AI. I have indexed Study-Sync into Qdrant vector store (384D) and Neo4j call graph (2,533 nodes). Ask me anything about symbol dependencies or architectural impact!',
+          sources: ['JwtService.java', 'AuthenticationService.java']
+        }
+      ]);
+
+      // Fetch demo workspaces from backend (or fallback to INITIAL_WORKSPACES)
       try {
         const wsList = await api.listWorkspaces();
         if (wsList && wsList.length > 0) {
           setWorkspaces(wsList);
           setSelectedWorkspace(wsList[0]);
+        } else {
+          setWorkspaces(INITIAL_WORKSPACES);
+          setSelectedWorkspace(INITIAL_WORKSPACES[0]);
         }
       } catch (wsErr) {
-        console.warn("Could not list workspaces from API:", wsErr);
+        console.warn("Could not list workspaces from API, using demo defaults:", wsErr);
+        setWorkspaces(INITIAL_WORKSPACES);
+        setSelectedWorkspace(INITIAL_WORKSPACES[0]);
       }
 
       setCurrentScreen('WORKSPACE_SELECT');
@@ -467,14 +483,30 @@ export default function App() {
         : await api.register(authEmail, authPassword);
       setCurrentUser(res.user);
 
+      // Clean inputs for custom authenticated user
+      setGitRepoInput('');
+      setRefactorPrompt('');
+      setQaMessages([
+        {
+          sender: 'assistant',
+          text: 'Hello! I am your CodeGraph-RAG Architectural AI. Ingest a codebase to search symbols, inspect dependencies, and generate verified refactors.',
+          sources: []
+        }
+      ]);
+
       try {
         const wsList = await api.listWorkspaces();
         if (wsList && wsList.length > 0) {
           setWorkspaces(wsList);
           setSelectedWorkspace(wsList[0]);
+        } else {
+          setWorkspaces([]);
+          setSelectedWorkspace(null);
         }
       } catch (wsErr) {
         console.warn("Workspace list fetch error:", wsErr);
+        setWorkspaces([]);
+        setSelectedWorkspace(null);
       }
 
       setCurrentScreen('WORKSPACE_SELECT');
@@ -486,6 +518,12 @@ export default function App() {
   const handleSignOut = () => {
     localStorage.removeItem('codegraph_token');
     setCurrentUser(null);
+    setWorkspaces([]);
+    setSelectedWorkspace(null);
+    setGitRepoInput('');
+    setRefactorPrompt('');
+    setAuthEmail('');
+    setAuthPassword('');
     setCurrentScreen('AUTH');
   };
 
@@ -611,7 +649,7 @@ export default function App() {
     }
   };
 
-  const isSelectedDemo = selectedWorkspace?.id?.startsWith('ws-');
+  const isSelectedDemo = Boolean(selectedWorkspace?.id?.startsWith('ws-') && currentUser?.isDemo);
   const currentSymbolMatch = workspaceSymbols.find(s => s.name === selectedSymbolKey) || workspaceSymbols[0];
   const dynamicFallbackGraph = currentSymbolMatch ? {
     name: currentSymbolMatch.name,
@@ -1089,13 +1127,15 @@ export default function App() {
               </p>
             </div>
 
-            <button
-              onClick={handleLoginDemoAccount}
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-xl text-xs font-mono font-bold flex items-center space-x-2"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              <span>Reload Demo Workspace</span>
-            </button>
+            {currentUser?.isDemo && (
+              <button
+                onClick={handleLoginDemoAccount}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-xl text-xs font-mono font-bold flex items-center space-x-2"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span>Reload Demo Workspace</span>
+              </button>
+            )}
           </div>
 
           <div className="space-y-4">
@@ -1105,62 +1145,76 @@ export default function App() {
               </h2>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {workspaces.map((ws) => (
-                <div
-                  key={ws.id}
-                  className="bg-slate-900 border border-slate-800 hover:border-cyan-500/50 p-5 rounded-2xl space-y-4 transition group shadow-lg"
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-center space-x-3">
-                      <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
-                        {ws.type === 'git' ? <GitBranch className="h-5 w-5" /> : <Folder className="h-5 w-5" />}
+            {workspaces.length === 0 ? (
+              <div className="bg-slate-900 border border-dashed border-slate-800 rounded-3xl p-10 text-center space-y-4">
+                <div className="h-12 w-12 rounded-2xl bg-slate-800 text-slate-400 flex items-center justify-center mx-auto">
+                  <Folder className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-200">No Codebase Workspaces Yet</h3>
+                  <p className="text-xs text-slate-400 max-w-md mx-auto mt-1">
+                    Your account does not have any repositories indexed yet. Ingest a Git repository or upload a local project folder / ZIP archive below to start exploring your codebase architecture.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {workspaces.map((ws) => (
+                  <div
+                    key={ws.id}
+                    className="bg-slate-900 border border-slate-800 hover:border-cyan-500/50 p-5 rounded-2xl space-y-4 transition group shadow-lg"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center space-x-3">
+                        <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
+                          {ws.type === 'git' ? <GitBranch className="h-5 w-5" /> : <Folder className="h-5 w-5" />}
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-slate-100 group-hover:text-cyan-400 transition">
+                            {ws.name}
+                          </h3>
+                          <p className="text-xs font-mono text-slate-400">{ws.repoUrl}</p>
+                        </div>
                       </div>
-                      <div>
-                        <h3 className="font-bold text-slate-100 group-hover:text-cyan-400 transition">
-                          {ws.name}
-                        </h3>
-                        <p className="text-xs font-mono text-slate-400">{ws.repoUrl}</p>
-                      </div>
-                    </div>
-                    <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-mono text-[10px] font-bold">
-                      {ws.status}
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-2 bg-slate-950 p-3 rounded-xl font-mono text-[11px] text-slate-300">
-                    <div>
-                      <span className="text-slate-500 block text-[10px]">Indexed Files</span>
-                      <span className="font-bold text-slate-100">{ws.filesCount}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-500 block text-[10px]">Graph Nodes</span>
-                      <span className="font-bold text-cyan-400">{ws.nodesCount}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-500 block text-[10px]">Smart Filtering</span>
-                      <span className="font-bold text-emerald-400">
-                        {ws.type === 'zip' ? '⚡ 99% Bloat Filtered' : 'AST Clean'}
+                      <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-mono text-[10px] font-bold">
+                        {ws.status}
                       </span>
                     </div>
-                  </div>
 
-                  <div className="flex items-center justify-between pt-1">
-                    <span className="text-xs text-slate-500">Indexed {ws.lastIndexed}</span>
-                    <button
-                      onClick={() => {
-                        setSelectedWorkspace(ws);
-                        setCurrentScreen('APP_WORKSPACE');
-                      }}
-                      className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-xl flex items-center space-x-1.5 transition shadow-lg shadow-cyan-500/20"
-                    >
-                      <span>Open Workspace</span>
-                      <ArrowRight className="h-3.5 w-3.5" />
-                    </button>
+                    <div className="grid grid-cols-3 gap-2 bg-slate-950 p-3 rounded-xl font-mono text-[11px] text-slate-300">
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">Indexed Files</span>
+                        <span className="font-bold text-slate-100">{ws.filesCount}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">Graph Nodes</span>
+                        <span className="font-bold text-cyan-400">{ws.nodesCount}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">Smart Filtering</span>
+                        <span className="font-bold text-emerald-400">
+                          {ws.type === 'zip' ? '⚡ 99% Bloat Filtered' : 'AST Clean'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-1">
+                      <span className="text-xs text-slate-500">Indexed {ws.lastIndexed}</span>
+                      <button
+                        onClick={() => {
+                          setSelectedWorkspace(ws);
+                          setCurrentScreen('APP_WORKSPACE');
+                        }}
+                        className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-xl flex items-center space-x-1.5 transition shadow-lg shadow-cyan-500/20"
+                      >
+                        <span>Open Workspace</span>
+                        <ArrowRight className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-6 shadow-xl">
@@ -1387,6 +1441,23 @@ export default function App() {
 
       {/* SCREEN 3: MAIN DEVELOPER PLATFORM WORKSPACE */}
       {currentScreen === 'APP_WORKSPACE' && (
+        !selectedWorkspace ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4 bg-slate-950">
+            <div className="h-16 w-16 rounded-2xl bg-slate-900 border border-slate-800 text-cyan-400 flex items-center justify-center">
+              <Folder className="h-8 w-8" />
+            </div>
+            <h3 className="text-lg font-bold text-slate-200">No Codebase Selected</h3>
+            <p className="text-xs text-slate-400 max-w-md">
+              Please select an existing workspace or ingest a new codebase repository to explore its architecture and call graph.
+            </p>
+            <button
+              onClick={() => setCurrentScreen('WORKSPACE_SELECT')}
+              className="px-5 py-2.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-xl shadow-lg shadow-cyan-500/20 transition"
+            >
+              Open Workspace Hub
+            </button>
+          </div>
+        ) : (
         <div className="flex-1 flex flex-col overflow-hidden">
           
           {/* WORKSPACE TAB NAVIGATION BAR */}
@@ -2155,6 +2226,7 @@ export default function App() {
             </div>
           )}
         </div>
+        )
       )}
 
       {/* PR MODAL */}

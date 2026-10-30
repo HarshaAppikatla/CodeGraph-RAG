@@ -153,9 +153,19 @@ def _run_background_zip_ingestion(workspace_id: str, temp_zip_path: str):
         db.close()
 
 
+def _is_demo_user(current_user: Optional[User]) -> bool:
+    """Helper to detect if the session is operating in public demo mode."""
+    if current_user is None:
+        return True
+    return current_user.email == "harsha.demo@codegraph.ai" or current_user.id == "usr-demo-777"
+
+
 def _owned_workspace(db: Session, workspace_id: str, current_user: Optional[User] = None) -> Workspace:
-    # Allow looking up any ingested workspace by ID for collaborative viewing and symbol inspection
-    ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    # Allow looking up workspace by ID with strict tenant boundary for non-demo users
+    query = db.query(Workspace).filter(Workspace.id == workspace_id)
+    if not _is_demo_user(current_user) and current_user:
+        query = query.filter(Workspace.user_id == current_user.id)
+    ws = query.first()
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found.")
     return ws
@@ -166,15 +176,30 @@ def list_workspaces(
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
-    """Returns active workspaces for the current developer session or returns defaults."""
-    # List all indexed workspaces so any repo added by the user is immediately selectable
-    db_workspaces = db.query(Workspace).order_by(Workspace.created_at.desc()).all()
-    results: List[WorkspaceResponse] = [_to_response(ws) for ws in db_workspaces]
+    """Returns active workspaces for the current developer session or returns defaults for demo account."""
+    if _is_demo_user(current_user):
+        demo_user_id = current_user.id if current_user else "usr-demo-777"
+        db_workspaces = (
+            db.query(Workspace)
+            .filter((Workspace.user_id == demo_user_id) | (Workspace.user_id == "usr-demo-777"))
+            .order_by(Workspace.created_at.desc())
+            .all()
+        )
+        custom_workspaces = [_to_response(ws) for ws in db_workspaces]
+        custom_ids = {ws.id for ws in custom_workspaces}
 
-    # If user has no custom workspaces yet, provide default demo workspaces
-    if not results:
-        results = [WorkspaceResponse(**dw) for dw in DEMO_WORKSPACES]
-    return results
+        # Preloaded demo workspaces (Study-Sync & Payment-Gateway) for demo account only
+        demos = [WorkspaceResponse(**dw) for dw in DEMO_WORKSPACES if dw["id"] not in custom_ids]
+        return demos + custom_workspaces
+
+    # Real registered/logged in user: strictly return ONLY workspaces belonging to this user
+    db_workspaces = (
+        db.query(Workspace)
+        .filter(Workspace.user_id == current_user.id)
+        .order_by(Workspace.created_at.desc())
+        .all()
+    )
+    return [_to_response(ws) for ws in db_workspaces]
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)
@@ -184,9 +209,10 @@ def get_workspace(
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Real status and counts for one workspace (the UI polls this while INDEXING)."""
-    for dw in DEMO_WORKSPACES:
-        if dw["id"] == workspace_id:
-            return WorkspaceResponse(**dw)
+    if _is_demo_user(current_user):
+        for dw in DEMO_WORKSPACES:
+            if dw["id"] == workspace_id:
+                return WorkspaceResponse(**dw)
     return _to_response(_owned_workspace(db, workspace_id, current_user))
 
 
@@ -197,7 +223,7 @@ def list_workspace_symbols(
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Classes/functions actually indexed for this workspace (feeds the symbol picker)."""
-    if any(dw["id"] == workspace_id for dw in DEMO_WORKSPACES):
+    if _is_demo_user(current_user) and any(dw["id"] == workspace_id for dw in DEMO_WORKSPACES):
         return {
             "status": "READY",
             "symbols": [
