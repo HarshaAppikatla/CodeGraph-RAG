@@ -408,14 +408,22 @@ export const BlastRadiusGraph = ({ graphData, onSelectNode, selectedNodeId }) =>
               <span className="font-bold text-cyan-300">{tooltip.data.label}</span>
             </div>
             <p className="text-slate-400 text-[11px]">
-              File: <span className="text-slate-200">{tooltip.data.file || 'Unknown'}</span>
+              File:{' '}
+              <span className={!tooltip.data.file || tooltip.data.file === 'Unknown' ? 'text-amber-400/90 font-medium' : 'text-slate-200'}>
+                {!tooltip.data.file || tooltip.data.file === 'Unknown' ? 'External / Built-in (StdLib)' : tooltip.data.file}
+              </span>
             </p>
             <p className="text-slate-400 text-[11px]">
               Type: <span className="text-cyan-400 font-bold">{tooltip.data.type || 'Node'}</span>
             </p>
             {tooltip.data.scope && (
               <p className="text-slate-400 text-[11px]">
-                Scope: <span className="text-slate-200">{tooltip.data.scope}</span>
+                Scope:{' '}
+                <span className="text-slate-200">
+                  {tooltip.data.scope.includes('Unknown')
+                    ? 'Runtime Built-in / External Dependency'
+                    : tooltip.data.scope}
+                </span>
               </p>
             )}
           </div>

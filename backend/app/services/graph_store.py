@@ -391,14 +391,16 @@ class Neo4jGraphStore:
                         continue
                     seen_callee_names.add(c_name)
                     c_file = (c_node.get("file") if hasattr(c_node, "get") else "Unknown") or "Unknown"
+                    is_external = not c_file or c_file == "Unknown"
+                    display_file = "External / StdLib" if is_external else c_file.replace("\\", "/").split("/")[-1]
                     c_id = f"callee_{i}"
                     nodes.append({
                         "id": c_id,
                         "label": c_name,
-                        "file": c_file.replace("\\", "/").split("/")[-1],
-                        "full_path": c_file,
+                        "file": display_file,
+                        "full_path": c_file if not is_external else "Standard Library / External Dependency",
                         "type": "CALLEE",
-                        "scope": f"Invoked Callee ({c_file.replace('\\', '/').split('/')[-1]})",
+                        "scope": "Runtime Built-in / External Dependency" if is_external else f"Invoked Callee ({display_file})",
                         "x": 260 + (len(seen_callee_names) * 110),
                         "y": 420,
                     })
