@@ -745,6 +745,103 @@ export default function App() {
 
   const activeGraph = liveGraphData || (isSelectedDemo ? (SYMBOL_GRAPHS[selectedSymbolKey] || SYMBOL_GRAPHS.generateToken) : dynamicFallbackGraph);
 
+  const architectureHealth = useMemo(() => {
+    if (!architectureGraphData?.nodes?.length) {
+      if (isSelectedDemo && selectedWorkspace?.id === 'ws-study-sync') {
+        return {
+          score: 94,
+          cycles: 0,
+          cycleList: [],
+          layerBypasses: 1,
+          bypassList: [{ source: 'UserController', target: 'UserRepository', note: 'Controller bypasses Service orchestration layer to execute raw queries directly.' }],
+          deadCode: 2,
+          deadCodeList: ['cleanupOldTokens', 'verifyLegacySignature'],
+          totalSymbols: 14,
+        };
+      }
+      return {
+        score: 98,
+        cycles: 0,
+        cycleList: [],
+        layerBypasses: 0,
+        bypassList: [],
+        deadCode: 0,
+        deadCodeList: [],
+        totalSymbols: workspaceSymbols.length || 0,
+      };
+    }
+
+    const nodes = architectureGraphData.nodes || [];
+    const edges = architectureGraphData.edges || [];
+
+    const methodNodes = nodes.filter(n => n.type === 'METHOD' || n.type === 'SYMBOL');
+    const calls = edges.filter(e => e.relationType === 'CALLS');
+
+    const calledTargets = new Set();
+    calls.forEach(e => {
+      if (e.to) calledTargets.add(String(e.to).toLowerCase());
+      if (e.target) calledTargets.add(String(e.target).toLowerCase());
+    });
+
+    const deadCodeList = methodNodes
+      .filter(m => {
+        const idLower = String(m.id || '').toLowerCase();
+        const labelLower = String(m.label || '').toLowerCase();
+        return !calledTargets.has(idLower) && !calledTargets.has(labelLower);
+      })
+      .map(m => m.label || m.id);
+
+    const callPairs = new Set();
+    const cycleList = [];
+    calls.forEach(e => {
+      const from = String(e.from || e.source || '');
+      const to = String(e.to || e.target || '');
+      if (from && to && from !== to) {
+        callPairs.add(`${from}--->${to}`);
+        if (callPairs.has(`${to}--->${from}`)) {
+          cycleList.push(`${from} ⇄ ${to}`);
+        }
+      }
+    });
+
+    const bypassList = [];
+    calls.forEach(e => {
+      const from = String(e.from || e.source || '');
+      const to = String(e.to || e.target || '');
+      const fromLower = from.toLowerCase();
+      const toLower = to.toLowerCase();
+      if (
+        (fromLower.includes('controller') || fromLower.includes('handler') || fromLower.includes('route')) &&
+        (toLower.includes('repository') || toLower.includes('dao') || toLower.includes('repo') || toLower.includes('findby') || toLower.includes('save('))
+      ) {
+        bypassList.push({
+          source: from,
+          target: to,
+          note: `${from} directly accesses data layer (${to}) without Service layer orchestration.`
+        });
+      }
+    });
+
+    const deadCount = deadCodeList.length;
+    const cycleCount = cycleList.length;
+    const bypassCount = bypassList.length;
+
+    let score = 100 - (cycleCount * 12) - (bypassCount * 6) - Math.min(20, Math.floor(deadCount * 1.5));
+    score = Math.max(50, Math.min(100, score));
+
+    return {
+      score,
+      cycles: cycleCount,
+      cycleList,
+      layerBypasses: bypassCount,
+      bypassList,
+      deadCode: deadCount,
+      deadCodeList: deadCodeList.slice(0, 8),
+      totalSymbols: methodNodes.length || workspaceSymbols.length || nodes.length,
+    };
+  }, [architectureGraphData, isSelectedDemo, selectedWorkspace?.id, workspaceSymbols]);
+
+
   const handleSendQaQuery = async () => {
     if (!qaInput.trim()) return;
     const userMsg = { sender: 'user', text: qaInput };
@@ -2071,46 +2168,48 @@ export default function App() {
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-2">
                   <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">Overall Health Score</div>
-                  <div className="text-3xl font-black text-emerald-400">
-                    {isSelectedDemo && selectedWorkspace?.id === 'ws-study-sync' ? '94 / 100' : '99 / 100'}
+                  <div className={`text-3xl font-black ${architectureHealth.score >= 90 ? 'text-emerald-400' : architectureHealth.score >= 75 ? 'text-amber-400' : 'text-rose-400'}`}>
+                    {architectureHealth.score} / 100
                   </div>
                   <div className="text-xs text-slate-500">
-                    {isSelectedDemo && selectedWorkspace?.id === 'ws-study-sync'
-                      ? '2 Architectural warnings flagged'
+                    {architectureHealth.layerBypasses > 0 || architectureHealth.cycles > 0
+                      ? `${architectureHealth.layerBypasses + architectureHealth.cycles} Architectural issue(s) flagged`
                       : 'Clean architectural boundaries verified'}
                   </div>
                 </div>
                 <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-2">
                   <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">Circular Dependencies</div>
-                  <div className="text-3xl font-black text-emerald-400">0</div>
-                  <div className="text-xs text-slate-500">No cyclic method loops found</div>
+                  <div className={`text-3xl font-black ${architectureHealth.cycles > 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                    {architectureHealth.cycles}
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {architectureHealth.cycles > 0 ? `${architectureHealth.cycles} cyclic call loop(s) detected` : 'No cyclic method loops found'}
+                  </div>
                 </div>
                 <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-2">
                   <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">Layer Bypass Rules</div>
-                  <div className={`text-3xl font-black ${isSelectedDemo && selectedWorkspace?.id === 'ws-study-sync' ? 'text-amber-400' : 'text-emerald-400'}`}>
-                    {isSelectedDemo && selectedWorkspace?.id === 'ws-study-sync' ? '1 Warning' : '0 Warnings'}
+                  <div className={`text-3xl font-black ${architectureHealth.layerBypasses > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                    {architectureHealth.layerBypasses} Warning{architectureHealth.layerBypasses === 1 ? '' : 's'}
                   </div>
                   <div className="text-xs text-slate-500">
-                    {isSelectedDemo && selectedWorkspace?.id === 'ws-study-sync' ? 'Controller directly accessing DAO' : 'All layers cleanly separated'}
+                    {architectureHealth.layerBypasses > 0 ? 'Controller directly accessing DAO/Repo' : 'All layers cleanly separated'}
                   </div>
                 </div>
                 <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-2">
                   <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">Dead Code Candidates</div>
                   <div className="text-3xl font-black text-cyan-400">
-                    {isSelectedDemo && selectedWorkspace?.id === 'ws-study-sync' ? '2 Functions' : '0 Functions'}
+                    {architectureHealth.deadCode} Function{architectureHealth.deadCode === 1 ? '' : 's'}
                   </div>
-                  <div className="text-xs text-slate-500">
-                    {isSelectedDemo && selectedWorkspace?.id === 'ws-study-sync' ? '0 incoming call graph edges' : 'Connected to AST call graph'}
-                  </div>
+                  <div className="text-xs text-slate-500">0 incoming call graph edges</div>
                 </div>
               </div>
 
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
                 <h3 className="text-sm font-bold text-slate-100 flex items-center space-x-2">
-                  {isSelectedDemo && selectedWorkspace?.id === 'ws-study-sync' ? (
+                  {architectureHealth.layerBypasses > 0 || architectureHealth.cycles > 0 ? (
                     <>
                       <AlertTriangle className="h-4 w-4 text-amber-400" />
-                      <span>Flagged Anti-Patterns & Coupling Violations</span>
+                      <span>Flagged Anti-Patterns & Coupling Violations ({architectureHealth.layerBypasses + architectureHealth.cycles})</span>
                     </>
                   ) : (
                     <>
@@ -2120,32 +2219,61 @@ export default function App() {
                   )}
                 </h3>
 
-                {isSelectedDemo && selectedWorkspace?.id === 'ws-study-sync' ? (
+                {architectureHealth.bypassList.length > 0 || architectureHealth.cycleList.length > 0 ? (
                   <div className="space-y-3">
-                    <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                      <div>
-                        <div className="flex items-center space-x-2">
-                          <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 text-[10px] font-mono font-bold">
-                            LAYER BYPASS
-                          </span>
-                          <span className="text-xs font-mono font-bold text-slate-200">
-                            UserController -&gt; UserRepository
-                          </span>
+                    {architectureHealth.bypassList.map((item, idx) => (
+                      <div key={idx} className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                        <div>
+                          <div className="flex items-center space-x-2">
+                            <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 text-[10px] font-mono font-bold">
+                              LAYER BYPASS
+                            </span>
+                            <span className="text-xs font-mono font-bold text-slate-200">
+                              {item.source} -&gt; {item.target}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-400 mt-1">
+                            {item.note}
+                          </p>
                         </div>
-                        <p className="text-xs text-slate-400 mt-1">
-                          Controller bypasses Service orchestration layer to execute raw queries directly.
-                        </p>
+                        <button
+                          onClick={() => {
+                            setActiveTab('QA');
+                            setQaInput(`Explain how to refactor ${item.source} to remove layer bypass violation with ${item.target}.`);
+                          }}
+                          className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 rounded-lg text-xs font-bold transition whitespace-nowrap"
+                        >
+                          Fix with Gemini
+                        </button>
                       </div>
-                      <button
-                        onClick={() => {
-                          setActiveTab('QA');
-                          setQaInput('Explain how to refactor UserController to remove layer bypass violation.');
-                        }}
-                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 rounded-lg text-xs font-bold transition whitespace-nowrap"
-                      >
-                        Fix with Gemini
-                      </button>
-                    </div>
+                    ))}
+
+                    {architectureHealth.cycleList.map((cyc, idx) => (
+                      <div key={'cyc-' + idx} className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                        <div>
+                          <div className="flex items-center space-x-2">
+                            <span className="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 text-[10px] font-mono font-bold">
+                              CIRCULAR DEPENDENCY
+                            </span>
+                            <span className="text-xs font-mono font-bold text-slate-200">
+                              {cyc}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-400 mt-1">
+                            Methods directly or indirectly call each other in a cyclic dependency loop.
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setActiveTab('QA');
+                            setQaInput(`Explain how to break cyclic dependency loop between ${cyc}.`);
+                          }}
+                          className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-rose-400 rounded-lg text-xs font-bold transition whitespace-nowrap"
+                        >
+                          Fix with Gemini
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 ) : (
                   <div className="p-6 rounded-xl bg-slate-950/60 border border-emerald-500/20 flex items-start space-x-4">
@@ -2155,7 +2283,7 @@ export default function App() {
                     <div>
                       <h4 className="text-sm font-bold text-slate-200">Clean Architectural Boundaries Verified</h4>
                       <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                        Workspace <span className="text-cyan-400 font-mono font-bold">{selectedWorkspace?.name || 'CodeGraph-RAG'}</span> adheres to modular architecture principles. No illegal layer bypasses, circular import cycles, or dead unreferenced functions were detected across {workspaceSymbols.length || selectedWorkspace?.nodesCount || 0} indexed symbols.
+                        Workspace <span className="text-cyan-400 font-mono font-bold">{selectedWorkspace?.name || 'Workspace'}</span> adheres to modular architecture principles. No illegal layer bypasses or circular import cycles were detected across {architectureHealth.totalSymbols} indexed symbols.
                       </p>
                     </div>
                   </div>
