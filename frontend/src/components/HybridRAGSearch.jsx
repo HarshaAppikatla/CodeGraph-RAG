@@ -70,7 +70,7 @@ export default function HybridRAGSearch({
   initialMessages = [],
   workspaceSymbols = [],
 }) {
-  const activeWorkspace = workspace?.id || 'ws-study-sync';
+  const activeWorkspace = workspace?.id || '';
 
   // State: Model, Thinking, and Keys
   const [selectedModel, setSelectedModel] = useState(AVAILABLE_MODELS[0]);
@@ -159,7 +159,7 @@ export default function HybridRAGSearch({
     return [
       {
         sender: 'assistant',
-        text: `### 🌐 CodeGraph-RAG Autonomous Assistant Initialized\n\nI am synchronized with **${workspace?.name || 'Study-Sync'}**.\n\n- **Indexed Files**: ${workspace?.filesCount || 211} source files (${workspace?.language || 'Polyglot'})\n- **Deterministic Graph**: ${workspace?.nodesCount || 2533} nodes, ${workspace?.edgesCount || 1195} call relations in Neo4j\n- **Hybrid Vector Index**: High-dimensional dense embeddings loaded in Qdrant\n\nAsk me about call flows, blast radius, class hierarchies, or refactor impacts!`,
+        text: `### 🌐 CodeGraph-RAG Autonomous Assistant Initialized\n\nI am synchronized with **${workspace?.name || 'Workspace'}**.\n\n- **Indexed Files**: ${workspace?.filesCount || 0} source files (${workspace?.language || 'Polyglot'})\n- **Deterministic Graph**: ${workspace?.nodesCount || 0} nodes, ${workspace?.edgesCount || 0} call relations in Neo4j\n- **Hybrid Vector Index**: High-dimensional dense embeddings loaded in Qdrant\n\nAsk me about call flows, blast radius, class hierarchies, or refactor impacts!`,
         sources: ['Neo4j Cypher Call Graph', 'Qdrant Dense Vector Store'],
       }
     ];

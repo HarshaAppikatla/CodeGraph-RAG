@@ -1,4 +1,10 @@
 {
+  "name": "codegraph-rag",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "build": "cd frontend && npm install && npm run build"
+  },
   "dependencies": {
     "@neon/config": "^1.9.5",
     "@neon/env": "^1.6.6"
