@@ -346,6 +346,17 @@ export default function App() {
       ]);
     }
 
+    // Sync latest workspace metadata from backend (detects branch/files updates)
+    api.getWorkspace(selectedWorkspace.id)
+      .then(latestWs => {
+        if (isCanceled || !latestWs) return;
+        if (latestWs.status !== selectedWorkspace.status || latestWs.filesCount !== selectedWorkspace.filesCount || latestWs.branch !== selectedWorkspace.branch) {
+          setSelectedWorkspace(latestWs);
+          setWorkspaces(prev => prev.map(w => w.id === latestWs.id ? latestWs : w));
+        }
+      })
+      .catch(console.warn);
+
     api.listWorkspaceSymbols(selectedWorkspace.id)
       .then(res => {
         if (isCanceled) return;
@@ -382,8 +393,33 @@ export default function App() {
         }
       });
 
+    // If workspace is still indexing, poll until READY
+    let pollTimer = null;
+    if (selectedWorkspace.status === 'INDEXING') {
+      pollTimer = setInterval(async () => {
+        try {
+          const ws = await api.getWorkspace(selectedWorkspace.id);
+          if (ws && ws.status === 'READY') {
+            setSelectedWorkspace(ws);
+            setWorkspaces(prev => prev.map(w => w.id === ws.id ? ws : w));
+            const symRes = await api.listWorkspaceSymbols(ws.id);
+            if (symRes?.symbols?.length > 0) {
+              setWorkspaceSymbols(symRes.symbols);
+              setSelectedSymbolKey(symRes.symbols[0].name);
+            }
+            const archRes = await api.getWorkspaceArchitectureGraph(ws.id);
+            if (archRes) setArchitectureGraphData(archRes);
+            clearInterval(pollTimer);
+          }
+        } catch (e) {
+          console.warn("Workspace background poll:", e);
+        }
+      }, 2500);
+    }
+
     return () => {
       isCanceled = true;
+      if (pollTimer) clearInterval(pollTimer);
     };
   }, [selectedWorkspace?.id]);
 
@@ -430,6 +466,36 @@ export default function App() {
       isCanceled = true;
     };
   }, [selectedSymbolKey, selectedWorkspace?.id, workspaceSymbols]);
+
+  const reloadSymbols = useCallback(() => {
+    if (!selectedWorkspace?.id) return;
+    api.getWorkspace(selectedWorkspace.id)
+      .then(ws => {
+        if (ws) {
+          setSelectedWorkspace(ws);
+          setWorkspaces(prev => prev.map(w => w.id === ws.id ? ws : w));
+        }
+      })
+      .catch(console.warn);
+
+    api.listWorkspaceSymbols(selectedWorkspace.id)
+      .then(res => {
+        const syms = res?.symbols || [];
+        setWorkspaceSymbols(syms);
+        if (syms.length > 0) {
+          setSelectedSymbolKey(prev => (syms.some(s => s.name === prev) ? prev : syms[0].name));
+        }
+      })
+      .catch(console.warn);
+
+    setIsArchLoading(true);
+    api.getWorkspaceArchitectureGraph(selectedWorkspace.id)
+      .then(arch => {
+        if (arch) setArchitectureGraphData(arch);
+      })
+      .catch(console.warn)
+      .finally(() => setIsArchLoading(false));
+  }, [selectedWorkspace?.id]);
 
   const handleLoginDemoAccount = async () => {
     setAuthError('');
@@ -676,7 +742,7 @@ export default function App() {
     codeSnippet: `// Symbol: ${currentSymbolMatch.name}\n// File: ${currentSymbolMatch.file || 'Source File'}\n\n// Indexed in Qdrant Vector Store`
   } : null;
 
-  const activeGraph = liveGraphData || (isSelectedDemo ? (SYMBOL_GRAPHS[selectedSymbolKey] || SYMBOL_GRAPHS.generateToken) : (dynamicFallbackGraph || SYMBOL_GRAPHS.generateToken));
+  const activeGraph = liveGraphData || (isSelectedDemo ? (SYMBOL_GRAPHS[selectedSymbolKey] || SYMBOL_GRAPHS.generateToken) : dynamicFallbackGraph);
 
   const handleSendQaQuery = async () => {
     if (!qaInput.trim()) return;
@@ -1569,8 +1635,15 @@ export default function App() {
                   {/* Symbol Selector Sidebar */}
               <aside className="w-80 border-r border-slate-800 bg-slate-900/40 flex flex-col">
                 <div className="p-4 border-b border-slate-800 space-y-3">
-                  <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                    AST Method / Class Inspector
+                  <div className="flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                    <span>AST Method / Class Inspector</span>
+                    <button
+                      onClick={reloadSymbols}
+                      title="Sync Symbols from Backend"
+                      className="p-1 hover:text-cyan-400 text-slate-500 rounded transition"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                    </button>
                   </div>
                   <div className="relative">
                     <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
@@ -1643,8 +1716,17 @@ export default function App() {
                       );
                     })
                   ) : (
-                    <div className="p-4 text-center text-xs text-slate-500 font-mono">
-                      No extracted symbols found in this workspace.
+                    <div className="p-6 text-center space-y-3">
+                      <div className="text-xs text-slate-500 font-mono">
+                        {selectedWorkspace?.status === 'INDEXING' ? 'Codebase indexing in progress...' : 'No extracted symbols found in this workspace.'}
+                      </div>
+                      <button
+                        onClick={reloadSymbols}
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 text-xs font-mono font-bold rounded-lg inline-flex items-center space-x-1.5 transition"
+                      >
+                        <RefreshCw className="h-3 w-3" />
+                        <span>Sync Symbols</span>
+                      </button>
                     </div>
                   )}
                 </div>
@@ -1727,7 +1809,28 @@ export default function App() {
                 </div>
 
                 {/* GRAPH VIEWPORT: Force D3 or Classic 2D */}
-                {graphVisualMode === 'force-d3' ? (
+                {!activeGraph ? (
+                  <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4 bg-slate-950">
+                    <div className="h-14 w-14 rounded-2xl bg-slate-900 border border-slate-800 text-cyan-400 flex items-center justify-center shadow-lg">
+                      <Search className="h-7 w-7" />
+                    </div>
+                    <h4 className="text-base font-bold text-slate-200">
+                      {workspaceSymbols.length === 0 ? 'Symbols Sync in Progress' : 'Select a Symbol to Inspect'}
+                    </h4>
+                    <p className="text-xs text-slate-400 max-w-sm">
+                      {workspaceSymbols.length === 0
+                        ? 'AST extraction has completed on the backend. Click Sync Symbols below to load all extracted functions and classes.'
+                        : 'Choose a class or method from the left sidebar to simulate its multi-hop blast radius, caller hierarchy, and callee dependencies.'}
+                    </p>
+                    <button
+                      onClick={reloadSymbols}
+                      className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold rounded-xl flex items-center space-x-1.5 transition shadow-lg shadow-cyan-500/20"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      <span>Sync Symbols Now</span>
+                    </button>
+                  </div>
+                ) : graphVisualMode === 'force-d3' ? (
                   <div className="flex-1 p-4 relative flex flex-col justify-between overflow-y-auto space-y-4">
                     <BlastRadiusGraph
                       graphData={activeGraph}
