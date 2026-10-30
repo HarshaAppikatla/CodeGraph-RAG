@@ -323,9 +323,18 @@ export default function App() {
 
     // Reset local graph and symbol states on workspace switch to avoid stale rendering
     setLiveGraphData(null);
+    setGeneratedDiff(null);
+    setRefactorHistory([]);
 
     if (!isDemo) {
       setSelectedSymbolKey('');
+      setRefactorPrompt('');
+    } else if (selectedWorkspace.id === 'ws-study-sync') {
+      setRefactorPrompt('Update JwtService.generateToken signature to accept explicit Claims map and set token expiration to 24 hours.');
+    } else if (selectedWorkspace.id === 'ws-payment-gw') {
+      setRefactorPrompt('Add idempotency key validation and distributed locking to processPayment endpoint.');
+    } else {
+      setRefactorPrompt('');
     }
 
     // Update initial QA chat greeting based on active workspace
@@ -989,13 +998,13 @@ export default function App() {
       ) : {
         filesChanged: 1,
         turn: (generatedDiff?.turn || 1) + (isFollowup ? 1 : 0),
-        summary: `Refactoring proposal synthesized for: '${promptToRun}' on ${targetFile}`,
+        summary: `Refactoring proposal synthesized for '${promptToRun}' on ${targetFile}`,
         diffs: [
           {
             file: targetFile,
-            old_code: "public String generateToken(UserDetails userDetails) {\n    return generateToken(new HashMap<>(), userDetails);\n}",
-            new_code: "public String generateToken(Map<String, Object> extraClaims, UserDetails userDetails, long expirationMs) {\n    return buildToken(extraClaims, userDetails, expirationMs > 0 ? expirationMs : 86400000L);\n}",
-            diffCode: `--- a/${targetFile}\n+++ b/${targetFile}\n@@ -38,3 +38,4 @@\n-public String generateToken(UserDetails userDetails) {\n-    return generateToken(new HashMap<>(), userDetails);\n+public String generateToken(Map<String, Object> extraClaims, UserDetails userDetails, long expirationMs) {\n+    return buildToken(extraClaims, userDetails, expirationMs > 0 ? expirationMs : 86400000L);`,
+            old_code: `// ${targetFile}\n// Original implementation before refactoring`,
+            new_code: `// ${targetFile}\n// Refactored implementation for objective: ${promptToRun}`,
+            diffCode: `--- a/${targetFile}\n+++ b/${targetFile}\n@@ -1,3 +1,4 @@\n+// Refactored for objective: ${promptToRun}`,
             syntax_validation: { is_valid: true, skipped: false, errors: [] }
           }
         ]
@@ -2302,15 +2311,56 @@ export default function App() {
                 </h3>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                    Refactoring Objective
-                  </label>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      Refactoring Objective
+                    </label>
+                    <span className="text-[11px] text-slate-500 font-mono">
+                      Targeting: <span className="text-cyan-400 font-semibold">{selectedWorkspace?.name || 'Workspace'}</span>
+                    </span>
+                  </div>
                   <textarea
                     rows={3}
                     value={refactorPrompt}
                     onChange={(e) => setRefactorPrompt(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-sans focus:outline-none focus:border-cyan-500"
+                    placeholder={
+                      selectedWorkspace?.name
+                        ? `Describe refactoring objective for ${selectedWorkspace.name} (e.g. Add validation, extract service layer, decouple database calls, or add error handling)...`
+                        : "Describe the refactoring objective for this repository..."
+                    }
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-sans focus:outline-none focus:border-cyan-500 placeholder:text-slate-600 transition"
                   />
+
+                  {/* Contextual Refactoring Suggestion Pills */}
+                  <div className="mt-2.5 flex items-center gap-2 flex-wrap">
+                    <span className="text-[11px] text-slate-500 font-medium">Suggestions:</span>
+                    {architectureHealth.bypassList.length > 0 ? (
+                      architectureHealth.bypassList.slice(0, 2).map((bp, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => setRefactorPrompt(`Refactor ${bp.source} to delegate database queries through an intermediate service layer instead of calling ${bp.target} directly.`)}
+                          className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px] transition text-left"
+                        >
+                          ⚡ Fix bypass: {bp.source.split('.').pop()} -&gt; {bp.target.split('.').pop()}
+                        </button>
+                      ))
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => setRefactorPrompt(`Add input validation and standardized error handling across all controller and API route handlers in ${selectedWorkspace?.name || 'workspace'}.`)}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[11px] transition"
+                    >
+                      🛡️ Add Input Validation & Guardrails
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRefactorPrompt(`Extract shared data formatting and database access logic into a dedicated service layer.`)}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[11px] transition"
+                    >
+                      🧩 Decouple Service Architecture
+                    </button>
+                  </div>
                 </div>
 
                 <button
