@@ -774,9 +774,6 @@ def _retrieve(workspace_id: Optional[str], text: str, top_k: int) -> List[Dict[s
     try:
         vs = get_vector_store()
         chunks = vs.search(text, top_k=top_k, workspace_id=workspace_id)
-        if not chunks and workspace_id:
-            # 2. Try global search across all workspace chunks
-            chunks = vs.search(text, top_k=top_k, workspace_id=None)
     except Exception as e:
         logger.warning(f"Vector store search notice: {e}")
 

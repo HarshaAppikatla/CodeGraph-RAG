@@ -25,8 +25,8 @@ class CodeVectorStore:
         self._model = None
 
         # 1. Initialize Qdrant Client (Cloud or local embedded storage)
-        qdrant_host = os.getenv("QDRANT_HOST")
-        qdrant_api_key = os.getenv("QDRANT_API_KEY")
+        qdrant_host = os.getenv("QDRANT_HOST") or getattr(settings, "QDRANT_HOST", None)
+        qdrant_api_key = os.getenv("QDRANT_API_KEY") or getattr(settings, "QDRANT_API_KEY", None)
 
         if qdrant_host and qdrant_host.startswith("http"):
             # Qdrant Cloud Instance
