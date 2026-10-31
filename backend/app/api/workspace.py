@@ -90,67 +90,102 @@ def _make_ingestor() -> RepositoryIngestor:
     return RepositoryIngestor(vector_store=get_vector_store(), graph_store=get_graph_store())
 
 
-def _finish_ingestion(db: Session, ws: Workspace, res: dict) -> None:
-    """Copies the REAL ingestion result onto the workspace row."""
-    if res.get("status") != "success":
-        INGEST_ERRORS[ws.id] = res.get("message") or "Ingestion failed."
-        ws.status = "FAILED"
-    elif res.get("total_files", 0) == 0:
-        INGEST_ERRORS[ws.id] = "No indexable source files were found."
-        ws.status = "FAILED"
-    else:
-        summary = res.get("indexing_summary", {})
-        ws.status = "READY"
-        if res.get("branch"):
-            ws.branch = res["branch"]
-        ws.files_count = res.get("total_files", 0)
-        ws.nodes_count = summary.get("graph_nodes", 0)
-        ws.edges_count = summary.get("graph_edges", 0)
-        languages = summary.get("languages") or []
-        ws.language = " / ".join(languages[:2]) if languages else "Unknown"
-        INGEST_ERRORS.pop(ws.id, None)
-    db.commit()
+def _finish_ingestion(workspace_id: str, res: dict) -> None:
+    """Updates the workspace row in a dedicated fresh DB session."""
+    try:
+        with SessionLocal() as db:
+            ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+            if not ws:
+                return
+            if res.get("status") != "success":
+                INGEST_ERRORS[ws.id] = res.get("message") or "Ingestion failed."
+                ws.status = "FAILED"
+            elif res.get("total_files", 0) == 0:
+                INGEST_ERRORS[ws.id] = "No indexable source files were found."
+                ws.status = "FAILED"
+            else:
+                summary = res.get("indexing_summary", {})
+                ws.status = "READY"
+                if res.get("branch"):
+                    ws.branch = res["branch"]
+                ws.files_count = res.get("total_files", 0)
+                ws.nodes_count = summary.get("graph_nodes", 0)
+                ws.edges_count = summary.get("graph_edges", 0)
+                languages = summary.get("languages") or []
+                ws.language = " / ".join(languages[:2]) if languages else "Polyglot"
+                INGEST_ERRORS.pop(ws.id, None)
+            db.commit()
+    except Exception as e:
+        logger.exception("Failed to finish ingestion for workspace %s: %s", workspace_id, e)
 
 
-def _fail_ingestion(db: Session, workspace_id: str, exc: Exception) -> None:
-    logger.exception("Ingestion failed for workspace %s", workspace_id)
+def _fail_ingestion(workspace_id: str, exc: Exception) -> None:
+    logger.exception("Ingestion crashed for workspace %s", workspace_id)
     INGEST_ERRORS[workspace_id] = f"{type(exc).__name__}: {exc}"
-    ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
-    if ws:
-        ws.status = "FAILED"
-        db.commit()
+    try:
+        with SessionLocal() as db:
+            ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+            if ws:
+                ws.status = "FAILED"
+                db.commit()
+    except Exception as dbe:
+        logger.error("Failed to set FAILED state in DB for workspace %s: %s", workspace_id, dbe)
 
 
 def _run_background_git_ingestion(workspace_id: str, repo_url: str, branch: str):
     """Background task running actual AST parsing, vector embedding, and graph ingestion."""
-    db: Session = SessionLocal()
     try:
-        ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
-        if not ws:
-            return
         res = _make_ingestor().ingest_git_repo(repo_url, branch=branch, workspace_id=workspace_id)
-        _finish_ingestion(db, ws, res)
+        _finish_ingestion(workspace_id, res)
     except Exception as e:
-        _fail_ingestion(db, workspace_id, e)
-    finally:
-        db.close()
+        _fail_ingestion(workspace_id, e)
 
 
 def _run_background_zip_ingestion(workspace_id: str, temp_zip_path: str):
     """Background task extracting and indexing uploaded project archive."""
-    db: Session = SessionLocal()
     try:
-        ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
-        if not ws:
-            return
         res = _make_ingestor().ingest_zip_archive(temp_zip_path, workspace_id=workspace_id)
-        _finish_ingestion(db, ws, res)
+        _finish_ingestion(workspace_id, res)
     except Exception as e:
-        _fail_ingestion(db, workspace_id, e)
+        _fail_ingestion(workspace_id, e)
     finally:
         if os.path.exists(temp_zip_path):
-            os.remove(temp_zip_path)
-        db.close()
+            try:
+                os.remove(temp_zip_path)
+            except Exception:
+                pass
+
+
+def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
+    """Universal Auto-Reconciliation: If a workspace is INDEXING, check if Neo4j already indexed nodes for it."""
+    if not ws or ws.status != "INDEXING":
+        return ws
+
+    try:
+        gs = get_graph_store()
+        if gs and gs.driver:
+            with gs.driver.session() as session:
+                f_res = session.run('MATCH (f:File {ws: $ws}) RETURN count(f) as cnt', ws=ws.id).single()
+                files_cnt = f_res['cnt'] if f_res else 0
+                n_res = session.run('MATCH (n {ws: $ws}) RETURN count(n) as cnt', ws=ws.id).single()
+                nodes_cnt = n_res['cnt'] if n_res else 0
+                e_res = session.run('MATCH (a {ws: $ws})-[r]->(b {ws: $ws}) RETURN count(r) as cnt', ws=ws.id).single()
+                edges_cnt = e_res['cnt'] if e_res else 0
+
+                if nodes_cnt > 0:
+                    ws.status = "READY"
+                    ws.files_count = files_cnt or 1
+                    ws.nodes_count = nodes_cnt
+                    ws.edges_count = edges_cnt
+                    if ws.language in ("Detecting...", "Unknown"):
+                        ws.language = "Polyglot"
+                    db.commit()
+                    db.refresh(ws)
+                    logger.info("Auto-reconciled workspace %s (%s) to READY (%d nodes)", ws.id, ws.name, nodes_cnt)
+    except Exception as err:
+        logger.warning("Reconciliation check error for %s: %s", ws.id, err)
+
+    return ws
 
 
 def _is_demo_user(current_user: Optional[User]) -> bool:
@@ -185,7 +220,7 @@ def list_workspaces(
             .order_by(Workspace.created_at.desc())
             .all()
         )
-        custom_workspaces = [_to_response(ws) for ws in db_workspaces]
+        custom_workspaces = [_to_response(_reconcile_indexing_workspace(ws, db)) for ws in db_workspaces]
         custom_ids = {ws.id for ws in custom_workspaces}
 
         # Preloaded demo workspaces (Study-Sync & Payment-Gateway) for demo account only
@@ -199,7 +234,7 @@ def list_workspaces(
         .order_by(Workspace.created_at.desc())
         .all()
     )
-    return [_to_response(ws) for ws in db_workspaces]
+    return [_to_response(_reconcile_indexing_workspace(ws, db)) for ws in db_workspaces]
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)
@@ -213,7 +248,8 @@ def get_workspace(
         for dw in DEMO_WORKSPACES:
             if dw["id"] == workspace_id:
                 return WorkspaceResponse(**dw)
-    return _to_response(_owned_workspace(db, workspace_id, current_user))
+    ws = _owned_workspace(db, workspace_id, current_user)
+    return _to_response(_reconcile_indexing_workspace(ws, db))
 
 
 @router.get("/{workspace_id}/symbols")

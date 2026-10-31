@@ -315,6 +315,26 @@ export default function App() {
     };
   }, []);
 
+  // Universal Auto-Poll: Silently checks status of any INDEXING workspaces on the Hub screen
+  useEffect(() => {
+    if (currentScreen !== 'WORKSPACE_SELECT') return;
+    const hasIndexing = workspaces.some(w => w.status === 'INDEXING');
+    if (!hasIndexing) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const freshList = await api.listWorkspaces();
+        if (freshList && freshList.length > 0) {
+          setWorkspaces(freshList);
+        }
+      } catch (err) {
+        console.warn("Auto-reconcile polling notice:", err);
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [currentScreen, workspaces]);
+
   // Dynamic Workspace Symbol and Info Loader
   useEffect(() => {
     if (!selectedWorkspace?.id) return;
@@ -1349,8 +1369,14 @@ export default function App() {
                           <p className="text-xs font-mono text-slate-400">{ws.repoUrl}</p>
                         </div>
                       </div>
-                      <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-mono text-[10px] font-bold">
-                        {ws.status}
+                      <span className={`px-2.5 py-1 rounded-full font-mono text-[10px] font-bold ${
+                        ws.status === 'READY'
+                          ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+                          : ws.status === 'INDEXING'
+                          ? 'bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 animate-pulse'
+                          : 'bg-rose-500/10 border border-rose-500/20 text-rose-400'
+                      }`}>
+                        {ws.status === 'INDEXING' ? '⚡ Indexing...' : ws.status}
                       </span>
                     </div>
 
@@ -1373,16 +1399,30 @@ export default function App() {
 
                     <div className="flex items-center justify-between pt-1">
                       <span className="text-xs text-slate-500">Indexed {ws.lastIndexed}</span>
-                      <button
-                        onClick={() => {
-                          setSelectedWorkspace(ws);
-                          setCurrentScreen('APP_WORKSPACE');
-                        }}
-                        className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-xl flex items-center space-x-1.5 transition shadow-lg shadow-cyan-500/20"
-                      >
-                        <span>Open Workspace</span>
-                        <ArrowRight className="h-3.5 w-3.5" />
-                      </button>
+                      {ws.status === 'READY' ? (
+                        <button
+                          onClick={() => {
+                            setSelectedWorkspace(ws);
+                            setCurrentScreen('APP_WORKSPACE');
+                          }}
+                          className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-xl flex items-center space-x-1.5 transition shadow-lg shadow-cyan-500/20 cursor-pointer"
+                        >
+                          <span>Open Workspace</span>
+                          <ArrowRight className="h-3.5 w-3.5" />
+                        </button>
+                      ) : ws.status === 'INDEXING' ? (
+                        <button
+                          disabled
+                          className="px-4 py-2 bg-slate-800 text-cyan-400 font-mono text-xs rounded-xl flex items-center space-x-1.5 opacity-80 cursor-wait border border-cyan-500/20"
+                        >
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin text-cyan-400" />
+                          <span>Indexing...</span>
+                        </button>
+                      ) : (
+                        <span className="text-xs text-rose-400 font-mono font-semibold px-2 py-1 bg-rose-500/10 rounded-lg border border-rose-500/20">
+                          Ingestion Failed
+                        </span>
+                      )}
                     </div>
                   </div>
                 ))}

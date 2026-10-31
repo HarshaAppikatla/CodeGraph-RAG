@@ -205,7 +205,7 @@ class CodeVectorStore:
 
     def upsert_code_batch(self, batch_items: List[Dict[str, Any]]) -> int:
         """
-        Embeds and upserts a list of documents in batch for maximum throughput.
+        Embeds and upserts a list of documents in memory-capped micro-batches for high reliability on constrained environments.
         Each item dict: {"doc_id": int, "code_snippet": str, "metadata": dict}
         """
         if not batch_items:
@@ -215,29 +215,32 @@ class CodeVectorStore:
         if not valid_items:
             return 0
 
-        texts = [item["code_snippet"] for item in valid_items]
-        vectors = self.generate_embeddings_batch(texts)
+        total_upserted = 0
+        chunk_size = 16
+        for i in range(0, len(valid_items), chunk_size):
+            chunk_items = valid_items[i:i + chunk_size]
+            texts = [item["code_snippet"] for item in chunk_items]
+            try:
+                vectors = self.generate_embeddings_batch(texts)
+                if not vectors or len(vectors) != len(chunk_items):
+                    continue
 
-        if not vectors or len(vectors) != len(valid_items):
-            self.log("⚠️ Batch embedding size mismatch or failure.")
-            return 0
+                points = []
+                for item, vector in zip(chunk_items, vectors):
+                    payload = {
+                        "snippet": item["code_snippet"],
+                        "code": item["code_snippet"],
+                        "content": item["code_snippet"],
+                        **item.get("metadata", {}),
+                    }
+                    points.append(PointStruct(id=item["doc_id"], vector=vector, payload=payload))
 
-        points = []
-        for item, vector in zip(valid_items, vectors):
-            payload = {
-                "snippet": item["code_snippet"],
-                "code": item["code_snippet"],
-                "content": item["code_snippet"],
-                **item.get("metadata", {}),
-            }
-            points.append(PointStruct(id=item["doc_id"], vector=vector, payload=payload))
+                self.qdrant.upsert(collection_name=self.collection_name, points=points)
+                total_upserted += len(points)
+            except Exception as e:
+                self.log(f"⚠️ Vector batch upsert notice (chunk {i}): {e}")
 
-        try:
-            self.qdrant.upsert(collection_name=self.collection_name, points=points)
-            return len(points)
-        except Exception as e:
-            self.log(f"⚠️ Qdrant Batch Upsert Notice: {e}")
-            return 0
+        return total_upserted
 
     def search_similar_code(
         self, query: str, limit: int = 5, workspace_id: Optional[str] = None
