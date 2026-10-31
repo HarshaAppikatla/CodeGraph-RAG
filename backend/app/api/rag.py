@@ -4,10 +4,12 @@ import os
 import re
 import time
 from typing import List, Dict, Any, Optional, Tuple
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from backend.app.config import settings
+from backend.app.database import get_db
 from backend.app.models.user import User
 from backend.app.api.auth import get_current_user_optional
 from backend.app.services.security import decrypt_api_key
@@ -46,6 +48,8 @@ class RefactorRequest(BaseModel):
     workspace_id: Optional[str] = "ws-study-sync"
     prompt: str
     gemini_api_key: Optional[str] = None
+    api_key: Optional[str] = None
+    provider: Optional[str] = "gemini"
     previous_diffs: Optional[List[Dict[str, Any]]] = None
 
 
@@ -55,6 +59,47 @@ class ArchitectureGraphRequest(BaseModel):
 
 
 DEMO_WORKSPACE_IDS = {"ws-study-sync", "ws-payment-gw"}
+
+
+def _is_demo_user(current_user: Optional[User]) -> bool:
+    """Helper to detect if user is the standard demo account."""
+    if current_user is None:
+        return False
+    return current_user.email == "harsha.demo@codegraph.ai" or current_user.id == "usr-demo-777"
+
+
+def _verify_workspace_access(
+    workspace_id: Optional[str],
+    current_user: Optional[User],
+    db: Session
+) -> None:
+    """Strictly validates tenant isolation for workspace operations."""
+    if not workspace_id:
+        return
+    # Public demo workspaces are accessible to everyone
+    if workspace_id in DEMO_WORKSPACE_IDS or workspace_id.startswith("ws-"):
+        return
+
+    # User-created custom workspaces require authentication and ownership
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to access this workspace."
+        )
+
+    from backend.app.models.workspace import Workspace
+    query = db.query(Workspace).filter(Workspace.id == workspace_id)
+    if _is_demo_user(current_user):
+        query = query.filter(Workspace.user_id == "usr-demo-777")
+    else:
+        query = query.filter(Workspace.user_id == current_user.id)
+
+    ws = query.first()
+    if not ws:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found or unauthorized."
+        )
 
 # Pre-computed structural graphs for instant, flawless UI inspection
 CANONICAL_SYMBOLS = {
@@ -121,8 +166,13 @@ CANONICAL_SYMBOLS = {
 
 
 @router.post("/impact")
-def analyze_impact(req: ImpactRequest):
+def analyze_impact(
+    req: ImpactRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
     """Executes multi-hop Cypher queries and calculates blast-radius impact metadata."""
+    _verify_workspace_access(req.workspace_id, current_user, db)
     symbol = req.symbol.strip()
 
     # Canned graphs only describe the bundled demo workspaces
@@ -468,13 +518,18 @@ def _build_vector_architecture_graph(workspace_id: Optional[str]) -> Dict[str, A
 
 
 @router.post("/architecture-graph")
-def get_architecture_graph(req: ArchitectureGraphRequest):
+def get_architecture_graph(
+    req: ArchitectureGraphRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
     """
     Returns the unified whole-repository knowledge graph connecting all classes,
     interfaces, methods, and files through [:EXTENDS], [:IMPLEMENTS], [:HAS_METHOD],
     [:CALLS], and [:CONTAINS_CLASS] relationships.
     """
     ws_id = (req.workspace_id or "ws-study-sync").strip()
+    _verify_workspace_access(ws_id, current_user, db)
 
     # 1. Check for canned high-fidelity demo graphs
     if ws_id in CANONICAL_ARCHITECTURE_GRAPHS:
@@ -688,19 +743,27 @@ def _resolve_key(
     provider: str = "gemini",
     req_key: Optional[str] = None,
     current_user: Optional[User] = None,
-    user_id: str = "default"
+    user_id: Optional[str] = None,
 ) -> str:
-    # Handle legacy call where first arg was req_key: _resolve_key(req_key, current_user)
-    if provider and (len(provider) > 20 or provider.startswith(("AIzaSy", "sk-", "gsk_"))):
+    """Resolves frontier/open-source LLM credentials securely for the active user session."""
+    # 0. Defensive handling for mixed-up or positional arguments
+    if isinstance(provider, User):
+        current_user = provider
+        provider = "gemini"
+    if isinstance(req_key, User):
+        current_user = req_key
+        req_key = None
+
+    if isinstance(provider, str) and (len(provider) > 20 or provider.startswith(("AIzaSy", "sk-", "gsk_"))):
         req_key = provider
         provider = "gemini"
-    elif provider is None:
+    elif not provider or not isinstance(provider, str):
         provider = "gemini"
 
     prov = provider.lower().strip()
 
-    # 1. Check incoming payload key
-    if req_key and len(req_key.strip()) > 15 and "..." not in req_key and "CONFIGURED" not in req_key:
+    # 1. Check incoming payload key (must be a valid string, not User or None)
+    if req_key and isinstance(req_key, str) and len(req_key.strip()) > 15 and "..." not in req_key and "CONFIGURED" not in req_key:
         cleaned = req_key.strip()
         # Mismatch protection: Do not pass Google Gemini key to OpenAI/Anthropic/DeepSeek/Groq
         if prov in ("openai", "anthropic", "deepseek", "groq") and cleaned.startswith("AIzaSy"):
@@ -716,19 +779,20 @@ def _resolve_key(
         else:
             return cleaned
 
-    # 2. Fetch provider-specific key from DB
-    from backend.app.services.security import get_user_encrypted_keys
-    db_keys = get_user_encrypted_keys(user=current_user, user_id=user_id)
-    if prov in db_keys and db_keys[prov]:
-        val = db_keys[prov].strip()
-        if prov == "openai" and not val.startswith("sk-"):
-            logger.warning("Ignoring invalid OpenAI key stored in DB (must start with 'sk-')")
-        elif prov == "anthropic" and not val.startswith("sk-ant-"):
-            logger.warning("Ignoring invalid Anthropic key stored in DB (must start with 'sk-ant-')")
-        elif prov == "groq" and not val.startswith("gsk_"):
-            logger.warning("Ignoring invalid Groq key stored in DB (must start with 'gsk_')")
-        else:
-            return val
+    # 2. Fetch provider-specific key from DB vault (strictly for authenticated user)
+    if current_user or user_id:
+        from backend.app.services.security import get_user_encrypted_keys
+        db_keys = get_user_encrypted_keys(user=current_user, user_id=user_id)
+        if prov in db_keys and db_keys[prov]:
+            val = db_keys[prov].strip()
+            if prov == "openai" and not val.startswith("sk-"):
+                logger.warning("Ignoring invalid OpenAI key stored in DB (must start with 'sk-')")
+            elif prov == "anthropic" and not val.startswith("sk-ant-"):
+                logger.warning("Ignoring invalid Anthropic key stored in DB (must start with 'sk-ant-')")
+            elif prov == "groq" and not val.startswith("gsk_"):
+                logger.warning("Ignoring invalid Groq key stored in DB (must start with 'gsk_')")
+            else:
+                return val
 
     # 3. Environment Variable Fallback per provider
     env_map = {
@@ -758,12 +822,12 @@ def _resolve_key(
     return ""
 
 
-def _require_key(req_key: Optional[str], current_user: Optional[User] = None) -> str:
-    key = _resolve_key(req_key, current_user)
+def _require_key(req_key: Optional[str] = None, current_user: Optional[User] = None, provider: str = "gemini") -> str:
+    key = _resolve_key(provider=provider, req_key=req_key, current_user=current_user)
     if not key:
         raise HTTPException(
             status_code=400,
-            detail="No Gemini API key configured. Enter your key in the top bar or set GEMINI_API_KEY in .env.",
+            detail=f"No API key configured for '{provider}'. Enter your key in the top bar or set {provider.upper()}_API_KEY.",
         )
     return key
 
@@ -994,8 +1058,10 @@ def _is_noise_file(filepath: str) -> bool:
 def run_hybrid_rag_query(
     req: QueryRequest,
     current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
 ):
     """Answers a question using code retrieved from THIS workspace's vector index."""
+    _verify_workspace_access(req.workspace_id, current_user, db)
     query = req.query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query is empty.")
@@ -1200,22 +1266,28 @@ def run_hybrid_rag_query(
 def execute_rag_qa_search(
     req: RAGSearchRequest,
     current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
 ):
     """Executes dual-stream hybrid RAG retrieval and synthesis with multi-provider model & thinking budget."""
-    return run_hybrid_rag_query(req, current_user)
+    _verify_workspace_access(req.workspace_id, current_user, db)
+    return run_hybrid_rag_query(req, current_user, db)
 
 
 @router.post("/refactor")
 def generate_refactor(
     req: RefactorRequest,
     current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
 ):
     """Asks the model for unified diffs and side-by-side snippets against the workspace's real files."""
+    _verify_workspace_access(req.workspace_id, current_user, db)
     prompt_text = req.prompt.strip()
     if not prompt_text:
         raise HTTPException(status_code=400, detail="Refactor prompt is empty.")
     
-    api_key = _resolve_key(req.gemini_api_key, current_user)
+    incoming_key = req.gemini_api_key or getattr(req, "api_key", None)
+    provider = getattr(req, "provider", "gemini") or "gemini"
+    api_key = _resolve_key(provider=provider, req_key=incoming_key, current_user=current_user)
     is_demo = req.workspace_id in DEMO_WORKSPACE_IDS
     if is_demo and not api_key:
         return _demo_refactor(prompt_text, req.previous_diffs)

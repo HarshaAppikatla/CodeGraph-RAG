@@ -7,9 +7,9 @@ from backend.app.config import settings
 
 
 def _get_cipher() -> Fernet:
-    """Derives a deterministic 32-byte Fernet key from the application secret."""
-    raw_secret = (settings.JWT_SECRET or "codegraph-rag-secret-key-2026").encode("utf-8")
-    derived = hashlib.sha256(raw_secret).digest()
+    """Derives a deterministic 32-byte Fernet key from the application encryption key."""
+    raw_secret = getattr(settings, "ENCRYPTION_KEY", None) or settings.JWT_SECRET
+    derived = hashlib.sha256(f"fernet-vault-salt:{raw_secret}".encode("utf-8")).digest()
     url_safe_key = base64.urlsafe_b64encode(derived)
     return Fernet(url_safe_key)
 
@@ -35,8 +35,18 @@ def decrypt_api_key(ciphertext: Optional[str]) -> Optional[str]:
     except Exception:
         pass
 
-    # 2. Try legacy secret keys for seamless backward compatibility
-    for legacy_secret in ["codegraph-rag-secret-key-2026"]:
+    # 2. Try raw JWT_SECRET without salt (for transition compatibility)
+    try:
+        key = base64.urlsafe_b64encode(hashlib.sha256(settings.JWT_SECRET.encode("utf-8")).digest())
+        return Fernet(key).decrypt(token_bytes).decode("utf-8")
+    except Exception:
+        pass
+
+    # 3. Try legacy secret keys for seamless backward compatibility with existing DB records
+    for legacy_secret in [
+        "codegraph-rag-secret-key-2026-production-v2",
+        "codegraph-rag-secret-key-2026"
+    ]:
         try:
             key = base64.urlsafe_b64encode(hashlib.sha256(legacy_secret.encode("utf-8")).digest())
             return Fernet(key).decrypt(token_bytes).decode("utf-8")
@@ -79,40 +89,39 @@ def decrypt_provider_keys(ciphertext: Optional[str]) -> Dict[str, str]:
     return {}
 
 
-def get_user_encrypted_keys(user: Optional[Any] = None, user_id: Optional[str] = "default") -> Dict[str, str]:
-    """Retrieves and decrypts all provider API keys for the specified user with backward compatibility."""
+def get_user_encrypted_keys(user: Optional[Any] = None, user_id: Optional[str] = None) -> Dict[str, str]:
+    """Retrieves and decrypts all provider API keys strictly for the specified user."""
     keys: Dict[str, str] = {}
 
     target_user = user
     if not target_user:
+        # If no explicit user object or user_id provided, NEVER fall back to another user
+        if not user_id or user_id in ("default", "anonymous", ""):
+            return {}
         try:
             from backend.app.database import SessionLocal
             from backend.app.models.user import User
             with SessionLocal() as db:
-                if user_id and user_id != "default":
-                    target_user = db.query(User).filter((User.id == user_id) | (User.email == user_id)).first()
+                target_user = db.query(User).filter((User.id == user_id) | (User.email == user_id)).first()
                 if not target_user:
-                    target_user = db.query(User).filter(User.id == "usr-demo-777").first()
-                if not target_user:
-                    target_user = db.query(User).first()
-                if target_user:
-                    # Detach / copy attributes before session closes
-                    target_dict = {
-                        "gemini": decrypt_api_key(getattr(target_user, "gemini_key_encrypted", None)),
-                        "openai": decrypt_api_key(getattr(target_user, "openai_key_encrypted", None)),
-                        "anthropic": decrypt_api_key(getattr(target_user, "anthropic_key_encrypted", None)),
-                        "deepseek": decrypt_api_key(getattr(target_user, "deepseek_key_encrypted", None)),
-                        "groq": decrypt_api_key(getattr(target_user, "groq_key_encrypted", None)),
-                        "bundle": decrypt_provider_keys(getattr(target_user, "provider_keys_encrypted", None)),
-                    }
-                    if target_dict["bundle"]:
-                        keys.update(target_dict["bundle"])
-                    for prov in ["gemini", "openai", "anthropic", "deepseek", "groq"]:
-                        if target_dict[prov] and not keys.get(prov):
-                            keys[prov] = target_dict[prov]
-                    return keys
+                    return {}
+                # Extract and decrypt keys while DB session is open
+                target_dict = {
+                    "gemini": decrypt_api_key(getattr(target_user, "gemini_key_encrypted", None)),
+                    "openai": decrypt_api_key(getattr(target_user, "openai_key_encrypted", None)),
+                    "anthropic": decrypt_api_key(getattr(target_user, "anthropic_key_encrypted", None)),
+                    "deepseek": decrypt_api_key(getattr(target_user, "deepseek_key_encrypted", None)),
+                    "groq": decrypt_api_key(getattr(target_user, "groq_key_encrypted", None)),
+                    "bundle": decrypt_provider_keys(getattr(target_user, "provider_keys_encrypted", None)),
+                }
+                if target_dict["bundle"]:
+                    keys.update(target_dict["bundle"])
+                for prov in ["gemini", "openai", "anthropic", "deepseek", "groq"]:
+                    if target_dict[prov] and not keys.get(prov):
+                        keys[prov] = target_dict[prov]
+                return keys
         except Exception:
-            pass
+            return {}
 
     if target_user:
         # 1. Unbundle JSON payload if present

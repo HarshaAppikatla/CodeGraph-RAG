@@ -1,3 +1,4 @@
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import jwt
@@ -16,6 +17,24 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
+
+
+def ensure_demo_user(db: Session) -> User:
+    """Guarantees the existence of the demo user record to satisfy PostgreSQL foreign keys."""
+    demo_email = "harsha.demo@codegraph.ai"
+    user = db.query(User).filter((User.id == "usr-demo-777") | (User.email == demo_email)).first()
+    if not user:
+        random_secret = secrets.token_urlsafe(32)
+        user = User(
+            id="usr-demo-777",
+            email=demo_email,
+            password_hash=pwd_context.hash(random_secret),
+            role="Lead Architect",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    return user
 
 
 class AuthRequest(BaseModel):
@@ -64,19 +83,7 @@ def get_current_user_optional(
 @router.post("/demo", response_model=AuthResponse)
 def login_demo(db: Session = Depends(get_db)):
     """Creates or returns the pre-configured demo developer account for 1-click access."""
-    demo_email = "harsha.demo@codegraph.ai"
-    user = db.query(User).filter(User.email == demo_email).first()
-    if not user:
-        user = User(
-            id="usr-demo-777",
-            email=demo_email,
-            password_hash=pwd_context.hash("demopassword2026"),
-            role="Lead Architect",
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-
+    user = ensure_demo_user(db)
     token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
     return AuthResponse(
         access_token=token,

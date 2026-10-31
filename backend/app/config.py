@@ -1,6 +1,10 @@
 import os
+import secrets
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_EPHEMERAL_SECRET = secrets.token_urlsafe(32)
 
 
 class Settings(BaseSettings):
@@ -16,7 +20,8 @@ class Settings(BaseSettings):
     QDRANT_API_KEY: Optional[str] = None
     QDRANT_PATH: Optional[str] = None
     CORS_ORIGINS: Optional[str] = None
-    JWT_SECRET: str = "codegraph-rag-secret-key-2026-production-v2"
+    JWT_SECRET: str = os.getenv("JWT_SECRET") or _EPHEMERAL_SECRET
+    ENCRYPTION_KEY: Optional[str] = None
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 

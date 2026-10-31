@@ -162,44 +162,69 @@ class RepositoryIngestor:
         self, repo_url: str, branch: Optional[str] = None, workspace_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Clones a remote Git repository into a temporary directory and indexes it with resilient branch fallbacks."""
-        clean_url = repo_url.strip()
-        self.log(f"📥 Cloning remote Git repository: {clean_url} (requested branch: {branch})")
+        clean_url = (repo_url or "").strip()
+        if not clean_url or clean_url.startswith("-") or any(ch in clean_url for ch in [";", "&", "|", "`", "$", "\n", "\r", " "]):
+            return {"status": "error", "message": "Invalid repository URL format."}
+
+        from urllib.parse import urlparse
+        parsed = urlparse(clean_url)
+        if parsed.scheme != "https":
+            return {"status": "error", "message": "Only secure https:// Git repository URLs are allowed."}
+        if not parsed.netloc:
+            return {"status": "error", "message": "Invalid Git repository domain."}
+
+        clean_branch = (branch or "").strip()
+        if clean_branch and (clean_branch.startswith("-") or any(ch in clean_branch for ch in [";", "&", "|", "`", "$", "\n", "\r", " "])):
+            clean_branch = "main"
+
+        self.log(f"📥 Cloning remote Git repository: {clean_url} (requested branch: {clean_branch or 'default'})")
         temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
+        clone_timeout = 120  # 2 minute timeout prevents hung workers
         try:
             cloned = False
             err_msg = ""
 
             # 1. Attempt clone with specified branch (if provided)
-            if branch and branch.strip():
-                clone_cmd = ["git", "clone", "--depth", "1", "-b", branch.strip(), clean_url, temp_dir]
-                res = subprocess.run(clone_cmd, capture_output=True, text=True)
-                if res.returncode == 0:
-                    cloned = True
-                else:
-                    err_msg = res.stderr.strip()
-                    self.log(f"⚠️ Branch '{branch}' clone notice: {err_msg}. Retrying remote default branch...")
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
+            if clean_branch:
+                clone_cmd = ["git", "clone", "--depth", "1", "-b", clean_branch, "--", clean_url, temp_dir]
+                try:
+                    res = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=clone_timeout)
+                    if res.returncode == 0:
+                        cloned = True
+                    else:
+                        err_msg = res.stderr.strip()
+                        self.log(f"⚠️ Branch '{clean_branch}' clone notice: {err_msg}. Retrying remote default branch...")
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
+                except subprocess.TimeoutExpired:
+                    self.log(f"⚠️ Branch '{clean_branch}' clone timed out after {clone_timeout}s.")
+                    err_msg = f"Git clone timed out after {clone_timeout} seconds."
 
             # 2. Fallback: clone without branch specifier (clones remote default branch, e.g. master/main)
             if not cloned:
-                fallback_cmd = ["git", "clone", "--depth", "1", clean_url, temp_dir]
-                res2 = subprocess.run(fallback_cmd, capture_output=True, text=True)
-                if res2.returncode == 0:
-                    cloned = True
-                else:
-                    err_msg = res2.stderr.strip() or err_msg
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
+                fallback_cmd = ["git", "clone", "--depth", "1", "--", clean_url, temp_dir]
+                try:
+                    res2 = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=clone_timeout)
+                    if res2.returncode == 0:
+                        cloned = True
+                    else:
+                        err_msg = res2.stderr.strip() or err_msg
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
+                except subprocess.TimeoutExpired:
+                    err_msg = f"Git clone timed out after {clone_timeout} seconds."
 
             # 3. Final fallback: explicitly try 'master' if requested branch was 'main'
-            if not cloned and branch != "master":
-                master_cmd = ["git", "clone", "--depth", "1", "-b", "master", clean_url, temp_dir]
-                res3 = subprocess.run(master_cmd, capture_output=True, text=True)
-                if res3.returncode == 0:
-                    cloned = True
-                else:
-                    err_msg = res3.stderr.strip() or err_msg
+            if not cloned and clean_branch != "master":
+                master_cmd = ["git", "clone", "--depth", "1", "-b", "master", "--", clean_url, temp_dir]
+                try:
+                    res3 = subprocess.run(master_cmd, capture_output=True, text=True, timeout=clone_timeout)
+                    if res3.returncode == 0:
+                        cloned = True
+                    else:
+                        err_msg = res3.stderr.strip() or err_msg
+                except subprocess.TimeoutExpired:
+                    err_msg = f"Git clone timed out after {clone_timeout} seconds."
 
             if not cloned:
                 self.log(f"❌ Git clone error: {err_msg}")

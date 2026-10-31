@@ -152,8 +152,8 @@ export default function App() {
   // Authentication & Global User State
   const [currentUser, setCurrentUser] = useState(null);
   const [authMode, setAuthMode] = useState('LOGIN');
-  const [authEmail, setAuthEmail] = useState('harsha.demo@codegraph.ai');
-  const [authPassword, setAuthPassword] = useState('demopassword2026');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
   const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('codegraph_gemini_api_key') || '');
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [tempApiKeyInput, setTempApiKeyInput] = useState('');
@@ -535,7 +535,7 @@ export default function App() {
       const res = await api.loginDemo();
       setCurrentUser(res.user);
       setAuthEmail(res.user.email);
-      setAuthPassword('demopassword2026');
+      setAuthPassword('');
 
       // Pre-load demo repository input and demo prompts
       setGitRepoInput('https://github.com/HarshaAppikatla/Study-Sync');
@@ -1240,13 +1240,10 @@ export default function App() {
               <div className="mb-6 p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-xs space-y-1 text-cyan-300">
                 <div className="font-bold flex items-center space-x-1.5">
                   <Key className="h-3.5 w-3.5" />
-                  <span>Pre-loaded Demo Credentials:</span>
+                  <span>1-Click Instant Demo Access</span>
                 </div>
-                <div className="font-mono text-[11px] text-slate-300">
-                  Email: <span className="text-cyan-400">harsha.demo@codegraph.ai</span>
-                </div>
-                <div className="font-mono text-[11px] text-slate-300">
-                  Password: <span className="text-cyan-400">demopassword2026</span>
+                <div className="text-[11px] text-slate-300">
+                  Instant sandbox with preloaded study-sync and payment-gateway codebases. No signup required.
                 </div>
               </div>
 

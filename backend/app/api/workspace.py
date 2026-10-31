@@ -2,6 +2,7 @@ import logging
 import os
 import tempfile
 import zipfile
+from urllib.parse import urlparse
 from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 from backend.app.database import get_db, SessionLocal
 from backend.app.models.workspace import Workspace
 from backend.app.models.user import User
-from backend.app.api.auth import get_current_user_optional
+from backend.app.api.auth import get_current_user_optional, ensure_demo_user
 from backend.app.services.repo_ingestor import RepositoryIngestor
 from backend.app.services.registry import get_vector_store, get_graph_store
 
@@ -189,20 +190,25 @@ def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
 
 
 def _is_demo_user(current_user: Optional[User]) -> bool:
-    """Helper to detect if the session is operating in public demo mode."""
+    """Helper to detect if the session is operating as the demo developer account."""
     if current_user is None:
-        return True
+        return False
     return current_user.email == "harsha.demo@codegraph.ai" or current_user.id == "usr-demo-777"
 
 
 def _owned_workspace(db: Session, workspace_id: str, current_user: Optional[User] = None) -> Workspace:
-    # Allow looking up workspace by ID with strict tenant boundary for non-demo users
+    """Strictly enforces tenant isolation: only the owner or authenticated demo user can access their workspace."""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required to access workspace.")
+
     query = db.query(Workspace).filter(Workspace.id == workspace_id)
-    if not _is_demo_user(current_user) and current_user:
+    if _is_demo_user(current_user):
+        query = query.filter(Workspace.user_id == "usr-demo-777")
+    else:
         query = query.filter(Workspace.user_id == current_user.id)
     ws = query.first()
     if not ws:
-        raise HTTPException(status_code=404, detail="Workspace not found.")
+        raise HTTPException(status_code=404, detail="Workspace not found or unauthorized.")
     return ws
 
 
@@ -211,19 +217,22 @@ def list_workspaces(
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
-    """Returns active workspaces for the current developer session or returns defaults for demo account."""
+    """Returns active workspaces for the current developer session."""
+    if not current_user:
+        # Anonymous visitors see only the preloaded read-only demo workspaces
+        return [WorkspaceResponse(**dw) for dw in DEMO_WORKSPACES]
+
     if _is_demo_user(current_user):
-        demo_user_id = current_user.id if current_user else "usr-demo-777"
         db_workspaces = (
             db.query(Workspace)
-            .filter((Workspace.user_id == demo_user_id) | (Workspace.user_id == "usr-demo-777"))
+            .filter(Workspace.user_id == "usr-demo-777")
             .order_by(Workspace.created_at.desc())
             .all()
         )
         custom_workspaces = [_to_response(_reconcile_indexing_workspace(ws, db)) for ws in db_workspaces]
         custom_ids = {ws.id for ws in custom_workspaces}
 
-        # Preloaded demo workspaces (Study-Sync & Payment-Gateway) for demo account only
+        # Preloaded demo workspaces (Study-Sync & Payment-Gateway) for demo account
         demos = [WorkspaceResponse(**dw) for dw in DEMO_WORKSPACES if dw["id"] not in custom_ids]
         return demos + custom_workspaces
 
@@ -244,10 +253,9 @@ def get_workspace(
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Real status and counts for one workspace (the UI polls this while INDEXING)."""
-    if _is_demo_user(current_user):
-        for dw in DEMO_WORKSPACES:
-            if dw["id"] == workspace_id:
-                return WorkspaceResponse(**dw)
+    for dw in DEMO_WORKSPACES:
+        if dw["id"] == workspace_id:
+            return WorkspaceResponse(**dw)
     ws = _owned_workspace(db, workspace_id, current_user)
     return _to_response(_reconcile_indexing_workspace(ws, db))
 
@@ -259,7 +267,7 @@ def list_workspace_symbols(
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Classes/functions actually indexed for this workspace (feeds the symbol picker)."""
-    if _is_demo_user(current_user) and any(dw["id"] == workspace_id for dw in DEMO_WORKSPACES):
+    if any(dw["id"] == workspace_id for dw in DEMO_WORKSPACES):
         return {
             "status": "READY",
             "symbols": [
@@ -347,7 +355,13 @@ async def ingest_workspace(
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Initiates dual-store ingestion for a Git repository or local ZIP archive (JSON or Form)."""
-    user_id = current_user.id if current_user else "usr-demo-777"
+    if not current_user:
+        # Guarantee demo user exists in PostgreSQL before workspace row is created to satisfy foreign key constraint
+        demo_user = ensure_demo_user(db)
+        user_id = demo_user.id
+    else:
+        user_id = current_user.id
+
     content_type = request.headers.get("content-type", "")
 
     repo_url = None
@@ -368,22 +382,35 @@ async def ingest_workspace(
         file = form.get("file")
 
     if upload_type == "git":
-        if not repo_url:
+        if not repo_url or not isinstance(repo_url, str):
             raise HTTPException(status_code=400, detail="repo_url is required for git ingestion.")
-        ws_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "") or "Git-Repository"
+        clean_url = repo_url.strip()
+        if clean_url.startswith("-") or any(ch in clean_url for ch in [";", "&", "|", "`", "$", "\n", "\r", " "]):
+            raise HTTPException(status_code=400, detail="Invalid repository URL format.")
+        parsed_url = urlparse(clean_url)
+        if parsed_url.scheme != "https":
+            raise HTTPException(status_code=400, detail="Only secure https:// Git repository URLs are allowed.")
+        if not parsed_url.netloc:
+            raise HTTPException(status_code=400, detail="Invalid Git repository domain.")
+
+        clean_branch = (branch or "main").strip()
+        if clean_branch.startswith("-") or any(ch in clean_branch for ch in [";", "&", "|", "`", "$", "\n", "\r", " "]):
+            clean_branch = "main"
+
+        ws_name = clean_url.rstrip("/").split("/")[-1].replace(".git", "") or "Git-Repository"
         ws = Workspace(
             user_id=user_id,
             name=ws_name,
-            repo_url=repo_url,
+            repo_url=clean_url,
             type="git",
-            branch=branch or "main",
+            branch=clean_branch,
             status="INDEXING",
             language="Detecting...",
         )
         db.add(ws)
         db.commit()
         db.refresh(ws)
-        background_tasks.add_task(_run_background_git_ingestion, ws.id, repo_url, branch or "main")
+        background_tasks.add_task(_run_background_git_ingestion, ws.id, clean_url, clean_branch)
 
     elif upload_type == "zip":
         # ZIP upload handling (multipart form with a 'file' field)

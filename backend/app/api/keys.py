@@ -440,24 +440,14 @@ class TestKeyRequest(BaseModel):
     api_key: Optional[str] = None
 
 
-def _get_target_user(current_user: Optional[User], db: Session) -> User:
-    """Returns active user or falls back to standard demo user for seamless local development."""
-    if current_user:
-        return current_user
-    demo_user = db.query(User).filter(User.id == "usr-demo-777").first()
-    if not demo_user:
-        demo_user = db.query(User).first()
-    if not demo_user:
-        demo_user = User(
-            id="usr-demo-777",
-            email="harsha.demo@codegraph.ai",
-            password_hash="demopassword2026",
-            role="Lead Architect",
+def _require_authenticated_user(current_user: Optional[User]) -> User:
+    """Ensures the caller is authenticated to read or modify vault credentials."""
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to manage API key vault.",
         )
-        db.add(demo_user)
-        db.commit()
-        db.refresh(demo_user)
-    return demo_user
+    return current_user
 
 
 @router.post("/save")
@@ -467,7 +457,7 @@ def save_provider_key(
     db: Session = Depends(get_db),
 ):
     """Securely stores and encrypts one or more provider keys using authenticated AES-128-CBC."""
-    user = _get_target_user(current_user, db)
+    user = _require_authenticated_user(current_user)
 
     # 1. Load existing decrypted dictionary
     existing_keys = get_user_encrypted_keys(user=user)
@@ -523,9 +513,8 @@ def get_keys_status(
     current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
-    """Returns provider key configuration status and safe masked previews."""
-    user = _get_target_user(current_user, db)
-    existing_keys = get_user_encrypted_keys(user=user)
+    """Returns provider key configuration status and safe masked previews for the active user."""
+    existing_keys = get_user_encrypted_keys(user=current_user) if current_user else {}
 
     status_map = _compute_status_map(existing_keys)
     masked_map: Dict[str, Optional[str]] = {}
@@ -539,7 +528,8 @@ def get_keys_status(
             key_val = settings.GEMINI_API_KEY.strip()
 
         is_configured = status_map.get(prov, False)
-        masked_map[prov] = mask_api_key(key_val) if (is_configured and key_val) else None
+        # Only provide masked previews if user is authenticated
+        masked_map[prov] = mask_api_key(key_val) if (is_configured and key_val and current_user) else None
 
     # Merge status_map top-level keys for direct spec matching: { "gemini": true, "openai": false, ... }
     return {
@@ -557,7 +547,7 @@ def delete_provider_key(
     db: Session = Depends(get_db),
 ):
     """Clears the stored encrypted key for a specific provider."""
-    user = _get_target_user(current_user, db)
+    user = _require_authenticated_user(current_user)
     existing_keys = get_user_encrypted_keys(user=user)
 
     prov = provider.lower().strip()
@@ -594,8 +584,7 @@ def get_available_models(
     Inspects configured API keys and queries provider model listing endpoints (e.g., Groq GET /openai/v1/models)
     to discover active production models. Falls back to curated defaults if unconfigured or offline.
     """
-    user = _get_target_user(current_user, db)
-    user_id = str(user.id)
+    user_id = str(current_user.id) if current_user else "anonymous"
     now = time.time()
 
     # Cache hit check
@@ -608,7 +597,7 @@ def get_available_models(
                 "total": len(_MODELS_CACHE["models"]),
             }
 
-    existing_keys = get_user_encrypted_keys(user=user)
+    existing_keys = get_user_encrypted_keys(user=current_user) if current_user else {}
     status_map = _compute_status_map(existing_keys)
 
     consolidated_models: List[Dict[str, Any]] = []
@@ -662,12 +651,11 @@ def test_provider_key(
 ):
     """Live validates API key connectivity against the provider endpoint."""
     prov = req.provider.lower().strip()
-    user = _get_target_user(current_user, db)
 
     # Resolve key
     key_val = req.api_key.strip() if req.api_key and len(req.api_key.strip()) > 15 else None
     if not key_val:
-        existing_keys = get_user_encrypted_keys(user=user)
+        existing_keys = get_user_encrypted_keys(user=current_user) if current_user else {}
         key_val = existing_keys.get(prov) or os.getenv(ENV_MAP.get(prov, ""))
     if prov == "gemini" and not key_val and settings.GEMINI_API_KEY:
         key_val = settings.GEMINI_API_KEY.strip()
