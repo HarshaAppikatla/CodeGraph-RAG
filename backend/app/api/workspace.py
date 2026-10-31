@@ -287,6 +287,58 @@ def list_workspace_symbols(
     return {"status": ws.status, "symbols": symbols}
 
 
+@router.delete("/{workspace_id}")
+def delete_workspace(
+    workspace_id: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Permanently deletes a workspace and cleans up its graph nodes (Neo4j), vector embeddings (Qdrant), and DB row."""
+    # 1. Protect canned demo workspaces from deletion
+    if any(dw["id"] == workspace_id for dw in DEMO_WORKSPACES) or workspace_id.startswith("ws-"):
+        raise HTTPException(
+            status_code=400,
+            detail="Preloaded demo workspaces cannot be deleted.",
+        )
+
+    # 2. Authenticate ownership
+    ws = _owned_workspace(db, workspace_id, current_user)
+    ws_name = ws.name
+
+    # 3. Purge error cache
+    INGEST_ERRORS.pop(ws.id, None)
+
+    # 4. Detach and delete all nodes and relationships in Neo4j
+    deleted_nodes = 0
+    try:
+        gs = get_graph_store()
+        if gs:
+            deleted_nodes = gs.delete_workspace(ws.id)
+    except Exception as ge:
+        logger.warning("Neo4j deletion notice for workspace %s: %s", ws.id, ge)
+
+    # 5. Delete vector embeddings in Qdrant
+    try:
+        vs = get_vector_store()
+        if vs:
+            vs.delete_workspace(ws.id)
+    except Exception as ve:
+        logger.warning("Qdrant deletion notice for workspace %s: %s", ws.id, ve)
+
+    # 6. Delete workspace record from PostgreSQL database
+    db.delete(ws)
+    db.commit()
+
+    logger.info("Successfully deleted workspace %s ('%s') and purged %d Neo4j nodes.", ws.id, ws_name, deleted_nodes)
+    return {
+        "success": True,
+        "message": f"Workspace '{ws_name}' deleted successfully.",
+        "workspace_id": workspace_id,
+        "deleted_nodes": deleted_nodes,
+    }
+
+
+
 @router.post("/ingest", response_model=WorkspaceResponse)
 async def ingest_workspace(
     request: Request,

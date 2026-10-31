@@ -321,3 +321,19 @@ class CodeVectorStore:
         except Exception as e:
             self.log(f"⚠️ Qdrant symbol listing notice: {e}")
         return [{"name": n, "file": f} for n, f in sorted(seen.items())][:limit]
+
+    def delete_workspace(self, workspace_id: str) -> bool:
+        """Deletes all vector embeddings associated with a workspace from Qdrant."""
+        if not workspace_id:
+            return False
+        try:
+            flt = Filter(must=[FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id))])
+            self.qdrant.delete(
+                collection_name=self.collection_name,
+                points_selector=flt,
+            )
+            self.log(f"🗑️ Deleted Qdrant points for workspace '{workspace_id}'")
+            return True
+        except Exception as e:
+            self.log(f"⚠️ Failed to delete Qdrant points for workspace '{workspace_id}': {e}")
+            return False

@@ -698,3 +698,18 @@ class Neo4jGraphStore:
         except Exception as e:
             self.log(f"⚠️ get_workspace_architecture_graph failed: {e}")
             return {"connected": False, "nodes": [], "edges": [], "message": f"Architecture query failed: {e}"}
+
+    def delete_workspace(self, workspace_id: str) -> int:
+        """Permanently deletes all nodes and relationships associated with a workspace from Neo4j."""
+        if not self.driver or not workspace_id:
+            return 0
+        try:
+            with self.driver.session() as session:
+                res = session.run("MATCH (n {ws: $ws}) DETACH DELETE n", ws=workspace_id)
+                summary = res.consume()
+                deleted = summary.counters.nodes_deleted
+                self.log(f"🗑️ Deleted {deleted} Neo4j nodes for workspace '{workspace_id}'")
+                return deleted
+        except Exception as e:
+            self.log(f"⚠️ Failed to delete Neo4j nodes for workspace '{workspace_id}': {e}")
+            raise

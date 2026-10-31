@@ -11,7 +11,7 @@ import DynamicModelSelector from './components/DynamicModelSelector';
 import {
   Shield, Key, GitBranch, Cpu, Zap, AlertTriangle, ArrowRight, RefreshCw, Terminal, Sliders,
   Search, Activity, Sparkles, LogOut, Folder, UploadCloud, GitPullRequest, Check, Copy,
-  Plus, X, Lock, ZoomIn, ZoomOut, Maximize2, RotateCcw, Layers, CheckCircle2
+  Plus, X, Lock, ZoomIn, ZoomOut, Maximize2, RotateCcw, Layers, CheckCircle2, Trash2
 } from 'lucide-react';
 
 const INITIAL_WORKSPACES = [
@@ -215,6 +215,8 @@ export default function App() {
   // Workspaces List (Clean empty default for users; populated for demo account)
   const [workspaces, setWorkspaces] = useState([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState(null);
+  const [workspaceToDelete, setWorkspaceToDelete] = useState(null);
+  const [isDeletingWorkspace, setIsDeletingWorkspace] = useState(false);
 
   // Workspace Creation Form
   const [uploadType, setUploadType] = useState('git');
@@ -742,6 +744,27 @@ export default function App() {
     } catch (err) {
       setUploadError(err.message);
       setCurrentScreen('WORKSPACE_SELECT');
+    }
+  };
+
+  const handleDeleteWorkspace = async (workspace) => {
+    if (!workspace || !workspace.id) return;
+    try {
+      setIsDeletingWorkspace(true);
+      await api.deleteWorkspace(workspace.id);
+      setWorkspaces((prev) => prev.filter((w) => w.id !== workspace.id));
+      if (selectedWorkspace?.id === workspace.id) {
+        setSelectedWorkspace(null);
+        setCurrentScreen('WORKSPACE_SELECT');
+      }
+      setCopiedText(`Workspace "${workspace.name}" deleted successfully.`);
+      setTimeout(() => setCopiedText(null), 3500);
+      setWorkspaceToDelete(null);
+    } catch (err) {
+      console.error("Failed to delete workspace:", err);
+      alert(err.message || "Failed to delete workspace. Please try again.");
+    } finally {
+      setIsDeletingWorkspace(false);
     }
   };
 
@@ -1369,15 +1392,29 @@ export default function App() {
                           <p className="text-xs font-mono text-slate-400">{ws.repoUrl}</p>
                         </div>
                       </div>
-                      <span className={`px-2.5 py-1 rounded-full font-mono text-[10px] font-bold ${
-                        ws.status === 'READY'
-                          ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                          : ws.status === 'INDEXING'
-                          ? 'bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 animate-pulse'
-                          : 'bg-rose-500/10 border border-rose-500/20 text-rose-400'
-                      }`}>
-                        {ws.status === 'INDEXING' ? '⚡ Indexing...' : ws.status}
-                      </span>
+                      <div className="flex items-center space-x-2">
+                        <span className={`px-2.5 py-1 rounded-full font-mono text-[10px] font-bold ${
+                          ws.status === 'READY'
+                            ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+                            : ws.status === 'INDEXING'
+                            ? 'bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 animate-pulse'
+                            : 'bg-rose-500/10 border border-rose-500/20 text-rose-400'
+                        }`}>
+                          {ws.status === 'INDEXING' ? '⚡ Indexing...' : ws.status}
+                        </span>
+                        {!ws.id.startsWith('ws-') && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setWorkspaceToDelete(ws);
+                            }}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 border border-transparent hover:border-rose-500/20 transition cursor-pointer"
+                            title={`Delete workspace "${ws.name}"`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
                     </div>
 
                     <div className="grid grid-cols-3 gap-2 bg-slate-950 p-3 rounded-xl font-mono text-[11px] text-slate-300">
@@ -1399,30 +1436,42 @@ export default function App() {
 
                     <div className="flex items-center justify-between pt-1">
                       <span className="text-xs text-slate-500">Indexed {ws.lastIndexed}</span>
-                      {ws.status === 'READY' ? (
-                        <button
-                          onClick={() => {
-                            setSelectedWorkspace(ws);
-                            setCurrentScreen('APP_WORKSPACE');
-                          }}
-                          className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-xl flex items-center space-x-1.5 transition shadow-lg shadow-cyan-500/20 cursor-pointer"
-                        >
-                          <span>Open Workspace</span>
-                          <ArrowRight className="h-3.5 w-3.5" />
-                        </button>
-                      ) : ws.status === 'INDEXING' ? (
-                        <button
-                          disabled
-                          className="px-4 py-2 bg-slate-800 text-cyan-400 font-mono text-xs rounded-xl flex items-center space-x-1.5 opacity-80 cursor-wait border border-cyan-500/20"
-                        >
-                          <RefreshCw className="h-3.5 w-3.5 animate-spin text-cyan-400" />
-                          <span>Indexing...</span>
-                        </button>
-                      ) : (
-                        <span className="text-xs text-rose-400 font-mono font-semibold px-2 py-1 bg-rose-500/10 rounded-lg border border-rose-500/20">
-                          Ingestion Failed
-                        </span>
-                      )}
+                      <div className="flex items-center space-x-2">
+                        {!ws.id.startsWith('ws-') && (
+                          <button
+                            onClick={() => setWorkspaceToDelete(ws)}
+                            className="px-3 py-2 bg-slate-950 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 border border-slate-800 hover:border-rose-500/30 text-xs font-semibold rounded-xl flex items-center space-x-1.5 transition cursor-pointer"
+                            title="Delete Workspace"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            <span>Delete</span>
+                          </button>
+                        )}
+                        {ws.status === 'READY' ? (
+                          <button
+                            onClick={() => {
+                              setSelectedWorkspace(ws);
+                              setCurrentScreen('APP_WORKSPACE');
+                            }}
+                            className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-xl flex items-center space-x-1.5 transition shadow-lg shadow-cyan-500/20 cursor-pointer"
+                          >
+                            <span>Open Workspace</span>
+                            <ArrowRight className="h-3.5 w-3.5" />
+                          </button>
+                        ) : ws.status === 'INDEXING' ? (
+                          <button
+                            disabled
+                            className="px-4 py-2 bg-slate-800 text-cyan-400 font-mono text-xs rounded-xl flex items-center space-x-1.5 opacity-80 cursor-wait border border-cyan-500/20"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin text-cyan-400" />
+                            <span>Indexing...</span>
+                          </button>
+                        ) : (
+                          <span className="text-xs text-rose-400 font-mono font-semibold px-2 py-1 bg-rose-500/10 rounded-lg border border-rose-500/20">
+                            Ingestion Failed
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -1717,13 +1766,25 @@ export default function App() {
               </button>
             </div>
 
-            <button
-              onClick={() => setCurrentScreen('WORKSPACE_SELECT')}
-              className="text-xs font-semibold text-slate-400 hover:text-cyan-400 flex items-center space-x-1"
-            >
-              <Folder className="h-3.5 w-3.5" />
-              <span>Switch Workspace</span>
-            </button>
+            <div className="flex items-center space-x-3">
+              {!selectedWorkspace.id.startsWith('ws-') && (
+                <button
+                  onClick={() => setWorkspaceToDelete(selectedWorkspace)}
+                  className="text-xs font-semibold text-slate-400 hover:text-rose-400 flex items-center space-x-1.5 transition cursor-pointer"
+                  title="Delete current workspace"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Delete Workspace</span>
+                </button>
+              )}
+              <button
+                onClick={() => setCurrentScreen('WORKSPACE_SELECT')}
+                className="text-xs font-semibold text-slate-400 hover:text-cyan-400 flex items-center space-x-1 cursor-pointer"
+              >
+                <Folder className="h-3.5 w-3.5" />
+                <span>Switch Workspace</span>
+              </button>
+            </div>
           </div>
 
           {/* TAB 1: ARCHITECTURE & KNOWLEDGE GRAPH (SINGLE PLACE) */}
@@ -2623,6 +2684,81 @@ export default function App() {
               <Check className="h-4 w-4" />
               <span>Copy Git Commit Commands</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* DELETE WORKSPACE CONFIRMATION MODAL */}
+      {workspaceToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in">
+          <div className="bg-slate-900 border border-rose-500/30 rounded-3xl max-w-md w-full p-6 shadow-2xl shadow-rose-950/40 space-y-5">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-2xl">
+                  <Trash2 className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-100">Delete Workspace</h3>
+                  <p className="text-xs text-slate-400">Permanently purge repository data</p>
+                </div>
+              </div>
+              <button
+                disabled={isDeletingWorkspace}
+                onClick={() => setWorkspaceToDelete(null)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition disabled:opacity-50"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="bg-slate-950 border border-slate-800/80 rounded-2xl p-4 space-y-2.5 text-xs">
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-500">Workspace</span>
+                <span className="font-bold font-mono text-slate-100">{workspaceToDelete.name}</span>
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-500">Source</span>
+                <span className="font-mono text-cyan-400 truncate max-w-[200px]" title={workspaceToDelete.repoUrl}>
+                  {workspaceToDelete.repoUrl || workspaceToDelete.type}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-500">Graph Nodes</span>
+                <span className="font-mono text-emerald-400 font-bold">{workspaceToDelete.nodesCount || 0} nodes</span>
+              </div>
+              <div className="pt-2.5 border-t border-slate-900 text-[11px] text-rose-300/90 leading-relaxed">
+                ⚠️ This will permanently detach & remove all AST nodes and call graph relationships in Neo4j, delete vector embeddings from Qdrant, and delete this workspace record.
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-1">
+              <button
+                type="button"
+                disabled={isDeletingWorkspace}
+                onClick={() => setWorkspaceToDelete(null)}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:bg-slate-800 border border-slate-700 transition cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingWorkspace}
+                onClick={() => handleDeleteWorkspace(workspaceToDelete)}
+                className="px-4 py-2.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white transition flex items-center space-x-2 shadow-lg shadow-rose-900/40 cursor-pointer disabled:opacity-50"
+              >
+                {isDeletingWorkspace ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    <span>Deleting Workspace...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-4 w-4" />
+                    <span>Confirm Delete</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

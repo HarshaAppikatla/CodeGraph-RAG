@@ -144,6 +144,7 @@ export const api = {
   listWorkspaces: () => request('/api/workspace/list'),
   getWorkspace: (workspaceId) => request(`/api/workspace/${workspaceId}`),
   listWorkspaceSymbols: (workspaceId) => request(`/api/workspace/${workspaceId}/symbols`),
+  deleteWorkspace: (workspaceId) => request(`/api/workspace/${workspaceId}`, { method: 'DELETE' }),
 
   // payload: { repo_url, type, branch } for git, or { type: 'zip', file: File } for an upload
   ingestWorkspace: (payload) => {
