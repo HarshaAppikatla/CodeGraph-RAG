@@ -243,7 +243,15 @@ class RepositoryIngestor:
 
             if not cloned:
                 self.log(f"❌ Git clone error: {err_msg}")
-                return {"status": "error", "message": f"Git clone failed: {err_msg}"}
+                lower_err = err_msg.lower()
+                if any(x in lower_err for x in ["redirect", "301", "302", "moved", "followredirects"]):
+                    friendly_err = (
+                        "Git clone failed: Repository redirect detected. For SSRF security, HTTP redirects are disabled. "
+                        "Please provide the canonical repository URL (e.g. check for renamed repositories or verify the exact URL format on GitHub/GitLab)."
+                    )
+                else:
+                    friendly_err = f"Git clone failed: {err_msg}"
+                return {"status": "error", "message": friendly_err}
 
             # Detect actual cloned branch
             actual_branch = branch or "main"

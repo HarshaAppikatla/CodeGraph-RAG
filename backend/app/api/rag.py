@@ -58,14 +58,9 @@ class ArchitectureGraphRequest(BaseModel):
     limit: Optional[int] = 250
 
 
+from backend.app.models.user import is_demo_user
+
 DEMO_WORKSPACE_IDS = {"ws-study-sync", "ws-payment-gw"}
-
-
-def _is_demo_user(current_user: Optional[User]) -> bool:
-    """Helper to detect if user is the standard demo account."""
-    if current_user is None:
-        return False
-    return current_user.email == "harsha.demo@codegraph.ai" or current_user.id == "usr-demo-777"
 
 
 def _verify_workspace_access(
@@ -88,13 +83,7 @@ def _verify_workspace_access(
         )
 
     from backend.app.models.workspace import Workspace
-    query = db.query(Workspace).filter(Workspace.id == workspace_id)
-    if _is_demo_user(current_user):
-        query = query.filter(Workspace.user_id == "usr-demo-777")
-    else:
-        query = query.filter(Workspace.user_id == current_user.id)
-
-    ws = query.first()
+    ws = db.query(Workspace).filter(Workspace.id == workspace_id, Workspace.user_id == current_user.id).first()
     if not ws:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

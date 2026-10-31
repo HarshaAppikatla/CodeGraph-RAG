@@ -1,8 +1,17 @@
 import uuid
+from typing import Optional, Any
 from datetime import datetime, timezone
 from sqlalchemy import Column, String, DateTime
 from sqlalchemy.orm import relationship
 from backend.app.database import Base
+
+
+def is_demo_user(user: Optional[Any]) -> bool:
+    """Returns True if the user is an ephemeral or seeded demo developer account."""
+    if not user:
+        return False
+    user_id = getattr(user, "id", "")
+    return bool(user_id and user_id.startswith("usr-demo-"))
 
 
 class User(Base):

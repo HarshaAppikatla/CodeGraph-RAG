@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 from backend.app.config import settings
 from backend.app.database import get_db, SessionLocal
 from backend.app.models.workspace import Workspace
-from backend.app.models.user import User
-from backend.app.api.auth import get_current_user_optional, ensure_demo_user
+from backend.app.models.user import User, is_demo_user
+from backend.app.api.auth import get_current_user_optional
 from backend.app.services.repo_ingestor import RepositoryIngestor
 from backend.app.services.registry import get_vector_store, get_graph_store
 
@@ -261,17 +261,6 @@ def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
     return ws
 
 
-def _is_demo_user(current_user: Optional[User]) -> bool:
-    """Helper to detect if the session is operating as a demo developer account."""
-    if current_user is None:
-        return False
-    return (
-        current_user.id.startswith("usr-demo-")
-        or current_user.email.endswith("@codegraph.ai")
-        or current_user.email == "harsha.demo@codegraph.ai"
-    )
-
-
 def _owned_workspace(db: Session, workspace_id: str, current_user: Optional[User] = None) -> Workspace:
     """Strictly enforces tenant isolation: visitors only access and manage their own workspaces."""
     if not current_user:
@@ -293,7 +282,7 @@ def list_workspaces(
         # Anonymous visitors see only the preloaded read-only demo workspaces
         return [WorkspaceResponse(**dw) for dw in DEMO_WORKSPACES]
 
-    if _is_demo_user(current_user):
+    if is_demo_user(current_user):
         db_workspaces = (
             db.query(Workspace)
             .filter(Workspace.user_id == current_user.id)
