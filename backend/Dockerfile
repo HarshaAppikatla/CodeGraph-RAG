@@ -13,6 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt constraints.txt* ./
 RUN if [ -f constraints.txt ]; then pip install --no-cache-dir -r requirements.txt -c constraints.txt; else pip install --no-cache-dir -r requirements.txt; fi
 
+# Pre-download and cache FastEmbed ONNX model during build to eliminate runtime download
+# latency and prevent OOM spikes on memory-constrained (512MB) cloud instances like Render.
+ENV FASTEMBED_CACHE_PATH=/app/.fastembed_cache
+RUN python -c "from fastembed import TextEmbedding; list(TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='/app/.fastembed_cache').embed(['warmup']))"
+
 # Copy backend source code so both `backend.app...` and `app...` import paths resolve
 COPY . /app/backend/
 RUN cp -r /app/backend/app /app/app

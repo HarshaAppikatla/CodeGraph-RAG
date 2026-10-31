@@ -30,10 +30,21 @@ class Neo4jGraphStore:
     def _connect(self) -> None:
         """Establishes Neo4j connection and bootstraps constraints."""
         try:
+            driver_kwargs = {
+                "auth": (self.user, self.password),
+                "connection_timeout": 15.0,
+            }
+            try:
+                from neo4j import NotificationDisabledClassification
+                driver_kwargs["notifications_disabled_classifications"] = [
+                    NotificationDisabledClassification.UNRECOGNIZED
+                ]
+            except Exception:
+                pass
+
             self.driver = GraphDatabase.driver(
                 self.uri,
-                auth=(self.user, self.password),
-                connection_timeout=15.0
+                **driver_kwargs,
             )
             self.driver.verify_connectivity()
             self.log("✅ Connected to Neo4j Graph Database.")
@@ -57,6 +68,17 @@ class Neo4jGraphStore:
 
         try:
             with self.driver.session() as session:
+                # 0. Register polymorphic schema tokens so cross-language queries (e.g. IMPLEMENTS)
+                # do not trigger Neo4j GqlStatusObject "relationship type does not exist" warnings.
+                try:
+                    session.run(
+                        "MERGE (d:_SchemaInit {id: '__init__'}) "
+                        "MERGE (d)-[:IMPLEMENTS]->(d) "
+                        "MERGE (d)-[:EXTENDS]->(d) "
+                        "DETACH DELETE d"
+                    )
+                except Exception as e:
+                    self.log(f"⚠️ Relationship schema init notice: {e}")
                 # Older databases have global single-property constraints that would
                 # stop two workspaces from sharing a file path / symbol name.
                 try:

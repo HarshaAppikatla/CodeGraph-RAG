@@ -67,7 +67,13 @@ class CodeVectorStore:
                 os.environ["MKL_NUM_THREADS"] = "1"
                 from fastembed import TextEmbedding
                 self.log(f"🎯 Loading lightweight FastEmbed model '{self.model_name}'...")
-                self._model = TextEmbedding(model_name=self.model_name, threads=1, lazy_load=True)
+                cache_dir = os.getenv("FASTEMBED_CACHE_PATH", None)
+                self._model = TextEmbedding(
+                    model_name=self.model_name,
+                    cache_dir=cache_dir,
+                    threads=1,
+                    lazy_load=True,
+                )
                 self.vector_size = 384
                 self.log("✅ FastEmbed ONNX model ready (constrained to 1 thread & low memory).")
                 return self._model
