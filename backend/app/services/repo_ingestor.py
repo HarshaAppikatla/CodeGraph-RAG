@@ -371,6 +371,14 @@ class RepositoryIngestor:
             except Exception as vec_err:
                 self.log(f"⚠️ Vector batch indexing notice: {vec_err}")
 
+        try:
+            del parsed
+            del batch_vector_items
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+
         return {
             "vector_chunks": indexed_vectors,
             "graph_nodes": indexed_graph_nodes,

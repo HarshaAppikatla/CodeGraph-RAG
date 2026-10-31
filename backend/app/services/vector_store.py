@@ -60,13 +60,16 @@ class CodeVectorStore:
     def model(self):
         """Lazy loads lightweight FastEmbed (ONNX) or falls back to SentenceTransformer."""
         if self._model is None:
-            # 1. Try FastEmbed (Lightweight ONNX CPU, ~60MB RAM)
+            # 1. Try FastEmbed (Lightweight ONNX CPU, constrained to 1 thread to avoid memory spikes)
             try:
+                import os
+                os.environ["OMP_NUM_THREADS"] = "1"
+                os.environ["MKL_NUM_THREADS"] = "1"
                 from fastembed import TextEmbedding
                 self.log(f"🎯 Loading lightweight FastEmbed model '{self.model_name}'...")
-                self._model = TextEmbedding(model_name=self.model_name)
+                self._model = TextEmbedding(model_name=self.model_name, threads=1, lazy_load=True)
                 self.vector_size = 384
-                self.log("✅ FastEmbed ONNX model ready (~60MB RAM).")
+                self.log("✅ FastEmbed ONNX model ready (constrained to 1 thread & low memory).")
                 return self._model
             except Exception as fe_err:
                 self.log(f"⚠️ FastEmbed notice: {fe_err}. Trying SentenceTransformer fallback...")
@@ -173,14 +176,17 @@ class CodeVectorStore:
             return [[0.0] * self.vector_size for _ in texts]
         try:
             if hasattr(embedder, "embed"):
-                vectors = list(embedder.embed(texts, batch_size=32))
+                vectors = list(embedder.embed(texts, batch_size=8))
                 return [v.tolist() for v in vectors]
             else:
-                vectors = embedder.encode(texts, convert_to_numpy=True, batch_size=32, show_progress_bar=False)
+                vectors = embedder.encode(texts, convert_to_numpy=True, batch_size=8, show_progress_bar=False)
                 return vectors.tolist()
         except Exception as e:
             self.log(f"⚠️ Batch embedding generation error: {e}")
             return [[0.0] * self.vector_size for _ in texts]
+        finally:
+            import gc
+            gc.collect()
 
     def upsert_code_snippet(self, doc_id: int, code_snippet: str, metadata: Dict[str, Any]) -> bool:
         """Embeds a single code snippet and stores it in Qdrant."""
