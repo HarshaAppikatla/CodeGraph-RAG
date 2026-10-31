@@ -3,7 +3,7 @@ import sys
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -64,6 +64,17 @@ def root_endpoint():
         "service": "CodeGraph-RAG Backend Engine",
         "version": "2.0.0",
         "docs": "/docs",
+    }
+
+
+@app.get("/debug/headers")
+def debug_headers(request: Request):
+    """Temporary diagnostic endpoint to inspect incoming reverse-proxy headers."""
+    from backend.app.api.auth import _get_client_ip
+    return {
+        "headers": dict(request.headers),
+        "client_host": request.client.host if request.client else None,
+        "resolved_ip": _get_client_ip(request),
     }
 
 
