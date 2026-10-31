@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     QDRANT_API_KEY: Optional[str] = None
     QDRANT_PATH: Optional[str] = None
     CORS_ORIGINS: Optional[str] = None
+    GIT_ALLOWED_HOSTS: str = "github.com,gitlab.com,bitbucket.org"
     JWT_SECRET: str = _EPHEMERAL_SECRET
     ENCRYPTION_KEY: Optional[str] = None
     JWT_ALGORITHM: str = "HS256"

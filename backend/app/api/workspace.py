@@ -2,6 +2,7 @@ import logging
 import os
 import tempfile
 import zipfile
+from threading import Lock
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from typing import Dict, List, Optional
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from backend.app.config import settings
 from backend.app.database import get_db, SessionLocal
 from backend.app.models.workspace import Workspace
 from backend.app.models.user import User
@@ -21,7 +23,27 @@ router = APIRouter(prefix="/workspace", tags=["Workspaces"])
 
 MAX_ZIP_BYTES = 500 * 1024 * 1024  # Server-side safety cap (500 MB)
 
-# Why an ingestion failed, keyed by workspace id (process-local; the DB has no column for it)
+# In-memory tracking of currently running ingestion jobs (Option B)
+_ACTIVE_INGESTION_JOBS_LOCK = Lock()
+_ACTIVE_INGESTION_JOBS: set = set()
+
+
+def _register_active_job(workspace_id: str) -> None:
+    with _ACTIVE_INGESTION_JOBS_LOCK:
+        _ACTIVE_INGESTION_JOBS.add(workspace_id)
+
+
+def _unregister_active_job(workspace_id: str) -> None:
+    with _ACTIVE_INGESTION_JOBS_LOCK:
+        _ACTIVE_INGESTION_JOBS.discard(workspace_id)
+
+
+def _is_job_active(workspace_id: str) -> bool:
+    with _ACTIVE_INGESTION_JOBS_LOCK:
+        return workspace_id in _ACTIVE_INGESTION_JOBS
+
+
+# Why an ingestion failed, keyed by workspace id
 INGEST_ERRORS: Dict[str, str] = {}
 
 
@@ -144,21 +166,26 @@ def _fail_ingestion(workspace_id: str, exc: Exception) -> None:
 
 def _run_background_git_ingestion(workspace_id: str, repo_url: str, branch: str):
     """Background task running actual AST parsing, vector embedding, and graph ingestion."""
+    _register_active_job(workspace_id)
     try:
         res = _make_ingestor().ingest_git_repo(repo_url, branch=branch, workspace_id=workspace_id)
         _finish_ingestion(workspace_id, res)
     except Exception as e:
         _fail_ingestion(workspace_id, e)
+    finally:
+        _unregister_active_job(workspace_id)
 
 
 def _run_background_zip_ingestion(workspace_id: str, temp_zip_path: str):
     """Background task extracting and indexing uploaded project archive."""
+    _register_active_job(workspace_id)
     try:
         res = _make_ingestor().ingest_zip_archive(temp_zip_path, workspace_id=workspace_id)
         _finish_ingestion(workspace_id, res)
     except Exception as e:
         _fail_ingestion(workspace_id, e)
     finally:
+        _unregister_active_job(workspace_id)
         if os.path.exists(temp_zip_path):
             try:
                 os.remove(temp_zip_path)
@@ -197,18 +224,37 @@ def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
     except Exception as err:
         logger.warning("Reconciliation check error for %s: %s", ws.id, err)
 
-    # If Neo4j has 0 nodes and workspace has been INDEXING for > 3 minutes (e.g. server restarted during ingestion)
+    # Stale indexing check (Option B with Option A safety cap):
+    # - If job is active in this process: do not interrupt slow 0.1 vCPU ingests up to 20 mins.
+    # - If job is NOT in _ACTIVE_INGESTION_JOBS: process restarted/crashed, mark FAILED after 30s.
     try:
         if ws.created_at:
             created_tz = ws.created_at.replace(tzinfo=timezone.utc) if ws.created_at.tzinfo is None else ws.created_at
             elapsed_seconds = (datetime.now(timezone.utc) - created_tz).total_seconds()
-            if elapsed_seconds > 180:
-                ws.status = "FAILED"
-                ws.error_message = "Ingestion interrupted by server restart or timeout. Please re-index."
-                INGEST_ERRORS[ws.id] = ws.error_message
-                db.commit()
-                db.refresh(ws)
-                logger.info("Auto-marked stale INDEXING workspace %s (%s) as FAILED", ws.id, ws.name)
+            is_active = _is_job_active(ws.id)
+
+            db_ws = db.query(Workspace).filter(Workspace.id == ws.id).first() if ws not in db else ws
+            if not db_ws:
+                return ws
+
+            if is_active:
+                if elapsed_seconds > 1200:  # 20 minutes safety cap
+                    db_ws.status = "FAILED"
+                    db_ws.error_message = "Ingestion exceeded maximum safety cap (20 minutes). Please try a smaller repository."
+                    INGEST_ERRORS[db_ws.id] = db_ws.error_message
+                    db.commit()
+                    db.refresh(db_ws)
+                    logger.warning("Active workspace %s exceeded 20m safety cap, marked FAILED", db_ws.id)
+                    return db_ws
+            else:
+                if elapsed_seconds > 30:
+                    db_ws.status = "FAILED"
+                    db_ws.error_message = "Ingestion interrupted by server restart. Please re-index."
+                    INGEST_ERRORS[db_ws.id] = db_ws.error_message
+                    db.commit()
+                    db.refresh(db_ws)
+                    logger.info("Auto-marked restart-orphaned INDEXING workspace %s (%s) as FAILED", db_ws.id, db_ws.name)
+                    return db_ws
     except Exception as time_err:
         logger.warning("Stale indexing timeout check notice for %s: %s", ws.id, time_err)
 
@@ -216,23 +262,22 @@ def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
 
 
 def _is_demo_user(current_user: Optional[User]) -> bool:
-    """Helper to detect if the session is operating as the demo developer account."""
+    """Helper to detect if the session is operating as a demo developer account."""
     if current_user is None:
         return False
-    return current_user.email == "harsha.demo@codegraph.ai" or current_user.id == "usr-demo-777"
+    return (
+        current_user.id.startswith("usr-demo-")
+        or current_user.email.endswith("@codegraph.ai")
+        or current_user.email == "harsha.demo@codegraph.ai"
+    )
 
 
 def _owned_workspace(db: Session, workspace_id: str, current_user: Optional[User] = None) -> Workspace:
-    """Strictly enforces tenant isolation: only the owner or authenticated demo user can access their workspace."""
+    """Strictly enforces tenant isolation: visitors only access and manage their own workspaces."""
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required to access workspace.")
 
-    query = db.query(Workspace).filter(Workspace.id == workspace_id)
-    if _is_demo_user(current_user):
-        query = query.filter(Workspace.user_id == "usr-demo-777")
-    else:
-        query = query.filter(Workspace.user_id == current_user.id)
-    ws = query.first()
+    ws = db.query(Workspace).filter(Workspace.id == workspace_id, Workspace.user_id == current_user.id).first()
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found or unauthorized.")
     return ws
@@ -251,7 +296,7 @@ def list_workspaces(
     if _is_demo_user(current_user):
         db_workspaces = (
             db.query(Workspace)
-            .filter(Workspace.user_id == "usr-demo-777")
+            .filter(Workspace.user_id == current_user.id)
             .order_by(Workspace.created_at.desc())
             .all()
         )
@@ -329,10 +374,10 @@ def delete_workspace(
 ):
     """Permanently deletes a workspace and cleans up its graph nodes (Neo4j), vector embeddings (Qdrant), and DB row."""
     # 1. Protect canned demo workspaces from deletion
-    if any(dw["id"] == workspace_id for dw in DEMO_WORKSPACES) or workspace_id.startswith("ws-"):
+    if any(dw["id"] == workspace_id for dw in DEMO_WORKSPACES) or workspace_id.startswith("ws-demo-"):
         raise HTTPException(
-            status_code=400,
-            detail="Preloaded demo workspaces cannot be deleted.",
+            status_code=403,
+            detail="Preloaded sample demo workspaces cannot be deleted.",
         )
 
     # 2. Authenticate ownership
@@ -382,11 +427,11 @@ async def ingest_workspace(
 ):
     """Initiates dual-store ingestion for a Git repository or local ZIP archive (JSON or Form)."""
     if not current_user:
-        # Guarantee demo user exists in PostgreSQL before workspace row is created to satisfy foreign key constraint
-        demo_user = ensure_demo_user(db)
-        user_id = demo_user.id
-    else:
-        user_id = current_user.id
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required to ingest a workspace. Please sign in or click 1-Click Demo.",
+        )
+    user_id = current_user.id
 
     content_type = request.headers.get("content-type", "")
 
@@ -416,8 +461,20 @@ async def ingest_workspace(
         parsed_url = urlparse(clean_url)
         if parsed_url.scheme != "https":
             raise HTTPException(status_code=400, detail="Only secure https:// Git repository URLs are allowed.")
-        if not parsed_url.netloc:
+        hostname = (parsed_url.hostname or "").lower().strip()
+        if not hostname:
             raise HTTPException(status_code=400, detail="Invalid Git repository domain.")
+
+        # SSRF Protection: Block internal, loopback, and cloud metadata addresses
+        if hostname in ("localhost", "127.0.0.1", "::1", "169.254.169.254", "0.0.0.0"):
+            raise HTTPException(status_code=400, detail="Internal, metadata, or loopback Git addresses are not permitted.")
+
+        allowed_hosts = [h.strip().lower() for h in getattr(settings, "GIT_ALLOWED_HOSTS", "github.com,gitlab.com,bitbucket.org").split(",") if h.strip()]
+        if hostname not in allowed_hosts:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Git host '{hostname}' is not permitted. Allowed hosts: {', '.join(allowed_hosts)}"
+            )
 
         clean_branch = (branch or "main").strip()
         if clean_branch.startswith("-") or any(ch in clean_branch for ch in [";", "&", "|", "`", "$", "\n", "\r", " "]):

@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from backend.app.services.vector_store import CodeVectorStore
 from backend.app.services.graph_store import Neo4jGraphStore
 from backend.app.services.ast_parser import CodeASTParser, LANGUAGE_MODULE_MAP
+from backend.app.config import settings
 
 # Default directory & file patterns to ignore during ingestion
 DEFAULT_IGNORE_PATTERNS = {
@@ -170,8 +171,17 @@ class RepositoryIngestor:
         parsed = urlparse(clean_url)
         if parsed.scheme != "https":
             return {"status": "error", "message": "Only secure https:// Git repository URLs are allowed."}
-        if not parsed.netloc:
+        hostname = (parsed.hostname or "").lower().strip()
+        if not hostname:
             return {"status": "error", "message": "Invalid Git repository domain."}
+
+        # SSRF Protection: Block internal, loopback, and cloud metadata addresses
+        if hostname in ("localhost", "127.0.0.1", "::1", "169.254.169.254", "0.0.0.0"):
+            return {"status": "error", "message": "Internal, metadata, or loopback Git addresses are not permitted."}
+
+        allowed_hosts = [h.strip().lower() for h in getattr(settings, "GIT_ALLOWED_HOSTS", "github.com,gitlab.com,bitbucket.org").split(",") if h.strip()]
+        if hostname not in allowed_hosts:
+            return {"status": "error", "message": f"Git host '{hostname}' is not permitted. Allowed hosts: {', '.join(allowed_hosts)}"}
 
         clean_branch = (branch or "").strip()
         if clean_branch and (clean_branch.startswith("-") or any(ch in clean_branch for ch in [";", "&", "|", "`", "$", "\n", "\r", " "])):
@@ -180,13 +190,18 @@ class RepositoryIngestor:
         self.log(f"📥 Cloning remote Git repository: {clean_url} (requested branch: {clean_branch or 'default'})")
         temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
         clone_timeout = 120  # 2 minute timeout prevents hung workers
+        git_harden_flags = [
+            "-c", "protocol.allow=never",
+            "-c", "protocol.https.allow=always",
+            "-c", "http.followRedirects=false",
+        ]
         try:
             cloned = False
             err_msg = ""
 
             # 1. Attempt clone with specified branch (if provided)
             if clean_branch:
-                clone_cmd = ["git", "clone", "--depth", "1", "-b", clean_branch, "--", clean_url, temp_dir]
+                clone_cmd = ["git"] + git_harden_flags + ["clone", "--depth", "1", "-b", clean_branch, "--", clean_url, temp_dir]
                 try:
                     res = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=clone_timeout)
                     if res.returncode == 0:
@@ -202,7 +217,7 @@ class RepositoryIngestor:
 
             # 2. Fallback: clone without branch specifier (clones remote default branch, e.g. master/main)
             if not cloned:
-                fallback_cmd = ["git", "clone", "--depth", "1", "--", clean_url, temp_dir]
+                fallback_cmd = ["git"] + git_harden_flags + ["clone", "--depth", "1", "--", clean_url, temp_dir]
                 try:
                     res2 = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=clone_timeout)
                     if res2.returncode == 0:
@@ -216,7 +231,7 @@ class RepositoryIngestor:
 
             # 3. Final fallback: explicitly try 'master' if requested branch was 'main'
             if not cloned and clean_branch != "master":
-                master_cmd = ["git", "clone", "--depth", "1", "-b", "master", "--", clean_url, temp_dir]
+                master_cmd = ["git"] + git_harden_flags + ["clone", "--depth", "1", "-b", "master", "--", clean_url, temp_dir]
                 try:
                     res3 = subprocess.run(master_cmd, capture_output=True, text=True, timeout=clone_timeout)
                     if res3.returncode == 0:
