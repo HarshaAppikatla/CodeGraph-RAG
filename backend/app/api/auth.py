@@ -1,8 +1,11 @@
 import secrets
+import time
+from collections import defaultdict
+from threading import Lock
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -17,6 +20,33 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
+
+# Sliding window rate limiter for auth routes (10 attempts per minute per IP)
+_AUTH_RATE_LIMIT_LOCK = Lock()
+_AUTH_ATTEMPTS: dict = defaultdict(list)
+_MAX_AUTH_ATTEMPTS = 10
+_AUTH_WINDOW_SECONDS = 60
+
+
+def _check_auth_rate_limit(request: Request) -> None:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+    elif request.client and request.client.host:
+        client_ip = request.client.host
+    else:
+        client_ip = "127.0.0.1"
+
+    now = time.time()
+    with _AUTH_RATE_LIMIT_LOCK:
+        timestamps = [t for t in _AUTH_ATTEMPTS[client_ip] if now - t < _AUTH_WINDOW_SECONDS]
+        if len(timestamps) >= _MAX_AUTH_ATTEMPTS:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many authentication attempts. Please wait 1 minute before trying again.",
+            )
+        timestamps.append(now)
+        _AUTH_ATTEMPTS[client_ip] = timestamps
 
 
 def ensure_demo_user(db: Session) -> User:
@@ -98,8 +128,16 @@ def login_demo(db: Session = Depends(get_db)):
 
 
 @router.post("/register", response_model=AuthResponse)
-def register_user(req: AuthRequest, db: Session = Depends(get_db)):
+def register_user(req: AuthRequest, request: Request, db: Session = Depends(get_db)):
     """Registers a new developer account and issues a JWT token."""
+    _check_auth_rate_limit(request)
+
+    if not req.password or len(req.password.strip()) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 8 characters long.",
+        )
+
     existing = db.query(User).filter(User.email == req.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Account with this email already exists.")
@@ -127,8 +165,10 @@ def register_user(req: AuthRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=AuthResponse)
-def login_user(req: AuthRequest, db: Session = Depends(get_db)):
+def login_user(req: AuthRequest, request: Request, db: Session = Depends(get_db)):
     """Authenticates standard credentials and issues a JWT token."""
+    _check_auth_rate_limit(request)
+
     user = db.query(User).filter(User.email == req.email).first()
     if not user or not pwd_context.verify(req.password, user.password_hash):
         raise HTTPException(

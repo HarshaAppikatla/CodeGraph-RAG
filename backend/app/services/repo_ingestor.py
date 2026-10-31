@@ -264,12 +264,28 @@ class RepositoryIngestor:
             return {"status": "error", "message": f"ZIP file not found at: {zip_path}"}
         self.log(f"📦 Extracting ZIP archive: {zip_path}")
         temp_dir = tempfile.mkdtemp(prefix="codegraph_zip_")
+        MAX_UNCOMPRESSED_BYTES = 500 * 1024 * 1024  # 500 MB safety cap to prevent zip bombs
+        MAX_ZIP_ENTRIES = 25000
         try:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                infolist = zip_ref.infolist()
+                if len(infolist) > MAX_ZIP_ENTRIES:
+                    raise Exception(f"ZIP archive contains {len(infolist)} files, exceeding limit ({MAX_ZIP_ENTRIES}).")
+
+                total_uncompressed = sum(member.file_size for member in infolist)
+                if total_uncompressed > MAX_UNCOMPRESSED_BYTES:
+                    raise Exception(
+                        f"Uncompressed size ({total_uncompressed // (1024 * 1024)} MB) exceeds "
+                        f"safety limit ({MAX_UNCOMPRESSED_BYTES // (1024 * 1024)} MB) - potential zip bomb."
+                    )
+
                 resolved_temp = os.path.realpath(temp_dir)
-                for member in zip_ref.infolist():
+                prefix = resolved_temp + os.sep
+
+                for member in infolist:
                     member_path = os.path.realpath(os.path.join(temp_dir, member.filename))
-                    if not member_path.startswith(resolved_temp):
+                    # Zip-slip protection: strictly enforce that member path resides inside temp directory
+                    if not (member_path == resolved_temp or member_path.startswith(prefix)):
                         raise Exception(f"Zip slip security risk detected in entry: {member.filename}")
 
                     # Skip files in ignored dependency/build directories (directory segments only)
@@ -321,6 +337,19 @@ class RepositoryIngestor:
         """Processes source files through vector store and graph store pipelines."""
         ws = workspace_id or "global"
         base_path = Path(base_dir).resolve()
+
+        # Clean slate purge on re-ingestion to eliminate stale vector chunks and orphaned graph nodes
+        if ws and ws != "global":
+            try:
+                if self.vector_store and hasattr(self.vector_store, "delete_workspace"):
+                    self.vector_store.delete_workspace(ws)
+            except Exception as e:
+                self.log(f"⚠️ Vector store pre-index purge notice for {ws}: {e}")
+            try:
+                if self.graph_store and hasattr(self.graph_store, "delete_workspace"):
+                    self.graph_store.delete_workspace(ws)
+            except Exception as e:
+                self.log(f"⚠️ Graph store pre-index purge notice for {ws}: {e}")
 
         # Pass 1: read + parse every file
         parsed: List[Dict[str, Any]] = []

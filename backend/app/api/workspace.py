@@ -2,6 +2,7 @@ import logging
 import os
 import tempfile
 import zipfile
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
@@ -70,6 +71,7 @@ DEMO_WORKSPACES = [
 
 
 def _to_response(ws: Workspace) -> WorkspaceResponse:
+    err = getattr(ws, "error_message", None) or INGEST_ERRORS.get(ws.id)
     return WorkspaceResponse(
         id=ws.id,
         name=ws.name,
@@ -82,7 +84,7 @@ def _to_response(ws: Workspace) -> WorkspaceResponse:
         lastIndexed="Just now",
         status=ws.status,
         language=ws.language,
-        error=INGEST_ERRORS.get(ws.id),
+        error=err,
     )
 
 
@@ -99,14 +101,19 @@ def _finish_ingestion(workspace_id: str, res: dict) -> None:
             if not ws:
                 return
             if res.get("status") != "success":
-                INGEST_ERRORS[ws.id] = res.get("message") or "Ingestion failed."
+                err_msg = res.get("message") or "Ingestion failed."
+                INGEST_ERRORS[ws.id] = err_msg
+                ws.error_message = err_msg
                 ws.status = "FAILED"
             elif res.get("total_files", 0) == 0:
-                INGEST_ERRORS[ws.id] = "No indexable source files were found."
+                err_msg = "No indexable source files were found."
+                INGEST_ERRORS[ws.id] = err_msg
+                ws.error_message = err_msg
                 ws.status = "FAILED"
             else:
                 summary = res.get("indexing_summary", {})
                 ws.status = "READY"
+                ws.error_message = None
                 if res.get("branch"):
                     ws.branch = res["branch"]
                 ws.files_count = res.get("total_files", 0)
@@ -122,12 +129,14 @@ def _finish_ingestion(workspace_id: str, res: dict) -> None:
 
 def _fail_ingestion(workspace_id: str, exc: Exception) -> None:
     logger.exception("Ingestion crashed for workspace %s", workspace_id)
-    INGEST_ERRORS[workspace_id] = f"{type(exc).__name__}: {exc}"
+    err_msg = f"{type(exc).__name__}: {exc}"
+    INGEST_ERRORS[workspace_id] = err_msg
     try:
         with SessionLocal() as db:
             ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
             if ws:
                 ws.status = "FAILED"
+                ws.error_message = err_msg
                 db.commit()
     except Exception as dbe:
         logger.error("Failed to set FAILED state in DB for workspace %s: %s", workspace_id, dbe)
@@ -178,13 +187,30 @@ def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
                     ws.files_count = files_cnt or 1
                     ws.nodes_count = nodes_cnt
                     ws.edges_count = edges_cnt
+                    ws.error_message = None
                     if ws.language in ("Detecting...", "Unknown"):
                         ws.language = "Polyglot"
                     db.commit()
                     db.refresh(ws)
                     logger.info("Auto-reconciled workspace %s (%s) to READY (%d nodes)", ws.id, ws.name, nodes_cnt)
+                    return ws
     except Exception as err:
         logger.warning("Reconciliation check error for %s: %s", ws.id, err)
+
+    # If Neo4j has 0 nodes and workspace has been INDEXING for > 3 minutes (e.g. server restarted during ingestion)
+    try:
+        if ws.created_at:
+            created_tz = ws.created_at.replace(tzinfo=timezone.utc) if ws.created_at.tzinfo is None else ws.created_at
+            elapsed_seconds = (datetime.now(timezone.utc) - created_tz).total_seconds()
+            if elapsed_seconds > 180:
+                ws.status = "FAILED"
+                ws.error_message = "Ingestion interrupted by server restart or timeout. Please re-index."
+                INGEST_ERRORS[ws.id] = ws.error_message
+                db.commit()
+                db.refresh(ws)
+                logger.info("Auto-marked stale INDEXING workspace %s (%s) as FAILED", ws.id, ws.name)
+    except Exception as time_err:
+        logger.warning("Stale indexing timeout check notice for %s: %s", ws.id, time_err)
 
     return ws
 

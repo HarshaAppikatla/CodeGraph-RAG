@@ -77,6 +77,9 @@ def init_db():
                 for col_name, col_type in new_cols:
                     if col_name not in cols:
                         conn.execute(text(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}"))
+                ws_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(workspaces)")).fetchall()]
+                if "error_message" not in ws_cols:
+                    conn.execute(text("ALTER TABLE workspaces ADD COLUMN error_message VARCHAR(1024)"))
                 conn.commit()
             elif "postgres" in driver:
                 for col_name, col_type in [
@@ -88,6 +91,7 @@ def init_db():
                     ("provider_keys_encrypted", "VARCHAR(4096)"),
                 ]:
                     conn.execute(text(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
+                conn.execute(text("ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS error_message VARCHAR(1024)"))
                 conn.commit()
     except Exception as e:
         sys.stderr.write(f"⚠️ DB migration notice: {e}\n")

@@ -19,6 +19,7 @@ class Workspace(Base):
     edges_count = Column(Integer, default=0)
     status = Column(String(50), default="INDEXING")  # 'INDEXING', 'READY', 'FAILED'
     language = Column(String(100), default="Java / Spring Boot")
+    error_message = Column(String(1024), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="workspaces")

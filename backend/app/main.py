@@ -12,7 +12,8 @@ for p in [str(monorepo_root), str(backend_dir)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from backend.app.database import init_db
+from backend.app.database import init_db, engine
+from sqlalchemy import text
 from backend.app.api.auth import router as auth_router
 from backend.app.api.workspace import router as workspace_router
 from backend.app.api.rag import router as rag_router
@@ -67,9 +68,16 @@ def root_endpoint():
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
     """Standard health check endpoint for monitoring."""
+    db_status = "connected"
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as e:
+        db_status = f"disconnected: {e}"
+
     return {
-        "status": "healthy",
-        "database": "connected",
+        "status": "healthy" if db_status == "connected" else "degraded",
+        "database": db_status,
         "mcp_protocol": "supported",
     }
 
