@@ -9,9 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install dependencies (FastEmbed ONNX engine instead of heavy PyTorch)
-COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy requirements and install dependencies with frozen constraints
+COPY requirements.txt constraints.txt* ./
+RUN if [ -f constraints.txt ]; then pip install --no-cache-dir -r requirements.txt -c constraints.txt; else pip install --no-cache-dir -r requirements.txt; fi
 
 # Copy backend source code so both `backend.app...` and `app...` import paths resolve
 COPY . /app/backend/

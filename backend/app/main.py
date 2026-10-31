@@ -1,8 +1,10 @@
 import os
 import sys
+import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # Ensure monorepo root and backend root are in sys.path for flexible execution
@@ -65,21 +67,25 @@ def root_endpoint():
     }
 
 
-@app.api_route("/health", methods=["GET", "HEAD"])
-def health_check():
-    """Standard health check endpoint for monitoring."""
-    db_status = "connected"
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-    except Exception as e:
-        db_status = f"disconnected: {e}"
+logger = logging.getLogger("codegraph.health")
 
-    return {
-        "status": "healthy" if db_status == "connected" else "degraded",
-        "database": db_status,
-        "mcp_protocol": "supported",
-    }
+
+@app.api_route("/health", methods=["GET", "HEAD"])
+def health():
+    """Ultra-lightweight liveness check for external uptime monitors. Zero DB load to preserve Neon compute."""
+    return {"status": "ok"}
+
+
+@app.get("/health/db")
+def health_db():
+    """Deep readiness check verifying live database connectivity."""
+    try:
+        with engine.connect() as c:
+            c.execute(text("SELECT 1"))
+        return {"status": "ok", "database": "connected"}
+    except Exception:
+        logger.exception("DB health check failed")
+        return JSONResponse({"status": "degraded", "database": "disconnected"}, status_code=503)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,12 @@ from passlib.context import CryptContext
 from backend.app.config import settings
 from backend.app.database import get_db
 from backend.app.models.user import User
-from backend.app.services.security import encrypt_api_key, decrypt_api_key, mask_api_key
+from backend.app.services.security import (
+    encrypt_api_key,
+    decrypt_api_key,
+    decrypt_api_key_with_status,
+    mask_api_key,
+)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -225,11 +230,15 @@ def save_user_gemini_key(
 @router.get("/gemini-key", response_model=GeminiKeyResponse)
 def get_user_gemini_key(
     current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
 ):
     """Returns the masked status of the user's encrypted Gemini API key."""
     if not current_user or not current_user.gemini_key_encrypted:
         return GeminiKeyResponse(status="not_configured", configured=False, masked_key=None)
-    raw = decrypt_api_key(current_user.gemini_key_encrypted)
+    raw, was_legacy = decrypt_api_key_with_status(current_user.gemini_key_encrypted)
+    if raw and was_legacy:
+        current_user.gemini_key_encrypted = encrypt_api_key(raw)
+        db.commit()
     return GeminiKeyResponse(
         status="configured",
         configured=bool(raw),
