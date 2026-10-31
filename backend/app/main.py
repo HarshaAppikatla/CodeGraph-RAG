@@ -67,17 +67,6 @@ def root_endpoint():
     }
 
 
-@app.get("/debug/headers")
-def debug_headers(request: Request):
-    """Temporary diagnostic endpoint to inspect incoming reverse-proxy headers."""
-    from backend.app.api.auth import _get_client_ip
-    return {
-        "headers": dict(request.headers),
-        "client_host": request.client.host if request.client else None,
-        "resolved_ip": _get_client_ip(request),
-    }
-
-
 logger = logging.getLogger("codegraph.health")
 
 

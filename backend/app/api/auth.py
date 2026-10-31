@@ -56,11 +56,14 @@ def _is_private_ip(ip_str: str) -> bool:
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extracts client IP. Inspects from right to left to prevent client-forged X-Forwarded-For bypasses."""
-    # 1. Cloudflare edge connecting IP header
-    cf_ip = request.headers.get("cf-connecting-ip")
-    if cf_ip and not _is_private_ip(cf_ip):
-        return cf_ip.strip()
+    """Extracts client IP. Uses verified edge headers (CF-Connecting-IP, True-Client-IP)
+    enforced by Cloudflare and Render's ingress to prevent client spoofing.
+    """
+    # 1. Cloudflare & Render edge connecting headers (verified immune to client forgery)
+    for edge_header in ("cf-connecting-ip", "true-client-ip"):
+        val = request.headers.get(edge_header)
+        if val and not _is_private_ip(val):
+            return val.strip()
 
     # 2. Walk X-Forwarded-For from right to left (Render's proxy appends the real caller IP at the end)
     forwarded = request.headers.get("x-forwarded-for")
