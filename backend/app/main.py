@@ -54,7 +54,7 @@ app.include_router(rag_router, prefix="/api")
 app.include_router(keys_router, prefix="/api")
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root_endpoint():
     return {
         "status": "online",
@@ -64,7 +64,7 @@ def root_endpoint():
     }
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
     """Standard health check endpoint for monitoring."""
     return {
