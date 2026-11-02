@@ -202,6 +202,11 @@ def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
     if not ws or ws.status != "INDEXING":
         return ws
 
+    # If the background job is actively running in this process, DO NOT prematurely reconcile!
+    # Let the running ingest thread finish all files and call _finish_ingestion cleanly.
+    if _is_job_active(ws.id):
+        return ws
+
     try:
         gs = get_graph_store()
         if gs and gs.driver:
