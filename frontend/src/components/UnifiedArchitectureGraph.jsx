@@ -102,7 +102,8 @@ const NODE_TYPE_STYLES = {
 export const UnifiedArchitectureGraph = ({
   graphData,
   onFocusSymbol,
-  isLoading = false
+  isLoading = false,
+  onRefresh
 }) => {
   const svgRef = useRef(null);
   const containerRef = useRef(null);
@@ -516,8 +517,18 @@ export const UnifiedArchitectureGraph = ({
                 className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-100 rounded transition"
                 title="Reset View"
               >
-                <RefreshCw className="w-3.5 h-3.5" />
+                <Maximize2 className="w-3.5 h-3.5" />
               </button>
+              {onRefresh && (
+                <button
+                  onClick={onRefresh}
+                  disabled={isLoading}
+                  className="p-1 hover:bg-slate-800 text-slate-400 hover:text-cyan-400 rounded transition disabled:opacity-50"
+                  title="Reload Full Architecture Graph"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-cyan-400' : ''}`} />
+                </button>
+              )}
             </div>
 
             <div className="text-[11px] font-mono text-slate-400 bg-slate-900 border border-slate-800 px-2.5 py-1 rounded-lg">

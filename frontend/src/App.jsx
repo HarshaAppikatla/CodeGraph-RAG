@@ -722,6 +722,9 @@ export default function App() {
               setSelectedSymbolKey(symRes.symbols[0].name);
             }
 
+            const archRes = await api.getWorkspaceArchitectureGraph(statusWs.id).catch(() => null);
+            if (archRes) setArchitectureGraphData(archRes);
+
             setTimeout(() => {
               setCurrentScreen('APP_WORKSPACE');
             }, 700);
@@ -1830,6 +1833,7 @@ export default function App() {
                 <UnifiedArchitectureGraph
                   graphData={architectureGraphData}
                   isLoading={isArchLoading}
+                  onRefresh={reloadSymbols}
                   onFocusSymbol={(symName) => {
                     setSelectedSymbolKey(symName);
                     setGraphScope('SYMBOL');
