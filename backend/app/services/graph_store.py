@@ -619,45 +619,51 @@ class Neo4jGraphStore:
         # 2. File containment hierarchy ([:CONTAINS_CLASS], [:CONTAINS_FUNCTION])
         # 3. Class structure ([:HAS_METHOD])
         # 4. Cross-file imports ([:IMPORTS])
-        # 5. Connected call flows ([:CALLS])
+        # 5. Connected call flows ([:CALLS]) with dummy script tokens (unnamed_entity) filtered out
         cypher = """
         CALL () {
             MATCH (n)-[r:EXTENDS|IMPLEMENTS]->(m)
             WHERE ($ws IS NULL OR n.ws = $ws)
+              AND n.name <> "unnamed_entity" AND m.name <> "unnamed_entity"
             RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
             LIMIT 25
         }
         RETURN n, n_labels, r, r_type, m, m_labels
         UNION
         CALL () {
-            MATCH (n)-[r:CONTAINS_CLASS|CONTAINS_FUNCTION]->(m)
-            WHERE ($ws IS NULL OR n.ws = $ws)
+            MATCH (n:File)-[r:CONTAINS_CLASS|CONTAINS_FUNCTION]->(m)
+            WHERE ($ws IS NULL OR m.ws = $ws OR n.ws = $ws)
+              AND m.name <> "unnamed_entity" AND NOT m.name STARTS WITH "anon_"
             RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
             LIMIT 60
         }
         RETURN n, n_labels, r, r_type, m, m_labels
         UNION
         CALL () {
-            MATCH (n)-[r:HAS_METHOD]->(m)
-            WHERE ($ws IS NULL OR n.ws = $ws)
+            MATCH (n:Class)-[r:HAS_METHOD]->(m:Function)
+            WHERE ($ws IS NULL OR n.ws = $ws OR m.ws = $ws)
+              AND n.name <> "unnamed_entity" AND m.name <> "unnamed_entity"
             RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
             LIMIT 40
         }
         RETURN n, n_labels, r, r_type, m, m_labels
         UNION
         CALL () {
-            MATCH (n)-[r:IMPORTS]->(m)
-            WHERE ($ws IS NULL OR n.ws = $ws)
+            MATCH (n:File)-[r:IMPORTS]->(m)
+            WHERE ($ws IS NULL OR n.ws = $ws OR m.ws = $ws)
             RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
-            LIMIT 50
+            LIMIT 40
         }
         RETURN n, n_labels, r, r_type, m, m_labels
         UNION
         CALL () {
-            MATCH (n)-[r:CALLS]->(m)
+            MATCH (n:Function)-[r:CALLS]->(m:Function)
             WHERE ($ws IS NULL OR n.ws = $ws)
+              AND n.name <> "unnamed_entity" AND m.name <> "unnamed_entity"
+              AND NOT n.name STARTS WITH "anon_" AND NOT m.name STARTS WITH "anon_"
+              AND (n.file IS NOT NULL OR m.file IS NOT NULL)
             RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
-            LIMIT 150
+            LIMIT 120
         }
         RETURN n, n_labels, r, r_type, m, m_labels
         """
