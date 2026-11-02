@@ -308,14 +308,52 @@ export default function App() {
     setTimeout(() => setCopiedText(null), 2000);
   };
 
-  // Wake up backend (e.g. Render free tier) on page load & cleanup ingestion polling on unmount
+  // Wake up backend & restore existing session from token on page load/reload
   useEffect(() => {
     api.checkHealth?.().catch(() => {});
+
+    const token = localStorage.getItem('codegraph_token');
+    if (token) {
+      api.getMe?.()
+        .then(async (res) => {
+          if (res && res.user) {
+            setCurrentUser(res.user);
+            setAuthEmail(res.user.email);
+            const savedWsId = localStorage.getItem('codegraph_selected_ws_id');
+            try {
+              const wsList = await api.listWorkspaces();
+              if (wsList && wsList.length > 0) {
+                setWorkspaces(wsList);
+                const found = wsList.find(w => w.id === savedWsId);
+                const target = found || wsList[0];
+                setSelectedWorkspace(target);
+                setCurrentScreen(found ? 'APP_WORKSPACE' : 'WORKSPACE_SELECT');
+              } else if (res.user.isDemo) {
+                setWorkspaces(INITIAL_WORKSPACES);
+                setSelectedWorkspace(INITIAL_WORKSPACES[0]);
+                setCurrentScreen('WORKSPACE_SELECT');
+              }
+            } catch {
+              setCurrentScreen('WORKSPACE_SELECT');
+            }
+          }
+        })
+        .catch(() => {
+          localStorage.removeItem('codegraph_token');
+        });
+    }
+
     return () => {
       ingestTimers.current.forEach(clearInterval);
       ingestTimers.current = [];
     };
   }, []);
+
+  useEffect(() => {
+    if (selectedWorkspace?.id) {
+      localStorage.setItem('codegraph_selected_ws_id', selectedWorkspace.id);
+    }
+  }, [selectedWorkspace?.id]);
 
   // Universal Auto-Poll: Silently checks status of any INDEXING workspaces on the Hub screen
   useEffect(() => {
@@ -615,6 +653,7 @@ export default function App() {
 
   const handleSignOut = () => {
     localStorage.removeItem('codegraph_token');
+    localStorage.removeItem('codegraph_selected_ws_id');
     setCurrentUser(null);
     setWorkspaces([]);
     setSelectedWorkspace(null);

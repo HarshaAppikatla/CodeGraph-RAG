@@ -132,6 +132,7 @@ export const api = {
   deleteGeminiKey: () => request('/api/keys/gemini', { method: 'DELETE' }),
 
   // Authentication & Session
+  getMe: async () => storeToken(await request('/api/auth/me')),
   loginDemo: async () => storeToken(await request('/api/auth/demo', { method: 'POST' })),
 
   register: async (email, password) =>

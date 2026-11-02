@@ -244,13 +244,73 @@ def get_current_user_optional(
         return None
 
 
+@router.get("/me", response_model=AuthResponse)
+def get_current_user_profile(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: Session = Depends(get_db),
+):
+    """Restores the current user session from their existing JWT token."""
+    if not credentials:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    try:
+        payload = jwt.decode(credentials.credentials, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        user = db.query(User).filter((User.id == user_id) | (User.email == user_id)).first()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+        is_demo = is_demo_user(user)
+        name = f"Guest Dev ({user.id.replace('usr-demo-', '')})" if is_demo else user.email.split("@")[0]
+        token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
+        return AuthResponse(
+            access_token=token,
+            user=UserResponse(
+                id=user.id,
+                name=name,
+                email=user.email,
+                role=user.role,
+                isDemo=is_demo,
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Token validation failed: {e}")
+
+
 @router.post("/demo", response_model=AuthResponse)
 def login_demo(
     request: Request,
     background_tasks: BackgroundTasks,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db),
 ):
     """Creates an isolated per-visitor demo developer session with capped guests and zero CPU hashing."""
+    # If client already has a valid demo session token, preserve their account across page reloads
+    if credentials:
+        try:
+            payload = jwt.decode(credentials.credentials, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+            user_id = payload.get("sub")
+            if user_id:
+                existing_user = db.query(User).filter(User.id == user_id).first()
+                if existing_user and is_demo_user(existing_user):
+                    token = create_access_token({"sub": existing_user.id, "email": existing_user.email, "role": existing_user.role})
+                    suffix = existing_user.id.replace("usr-demo-", "")
+                    return AuthResponse(
+                        access_token=token,
+                        user=UserResponse(
+                            id=existing_user.id,
+                            name=f"Guest Dev ({suffix})",
+                            email=existing_user.email,
+                            role=existing_user.role,
+                            isDemo=True,
+                        ),
+                    )
+        except Exception:
+            pass
+
     _check_auth_ip_rate_limit(request)
 
     # Check for expired guests (> 24 hours) or if guest count exceeds MAX_LIVE_GUEST_USERS
