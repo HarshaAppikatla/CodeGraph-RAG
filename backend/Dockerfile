@@ -24,6 +24,10 @@ RUN cp -r /app/backend/app /app/app
 
 ENV PYTHONPATH=/app:/app/backend
 ENV PORT=8000
+# Limit glibc memory arenas to prevent heap fragmentation on 512MB instances
+ENV MALLOC_ARENA_MAX=2
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
 EXPOSE 8000
 
