@@ -107,6 +107,23 @@ def _is_valid_name(name: str) -> bool:
     return bool(name) and name != "unnamed_entity"
 
 
+_TS_PARSER_CACHE: Dict[str, Any] = {}
+
+def _get_reusable_parser(language_obj: Any, language_id: str) -> Optional[Any]:
+    if not Parser or not language_obj:
+        return None
+    if language_id not in _TS_PARSER_CACHE:
+        try:
+            p = Parser(language_obj)
+        except Exception:
+            p = Parser()
+            if hasattr(p, "language"):
+                p.language = language_obj
+            elif hasattr(p, "set_language"):
+                p.set_language(language_obj)
+        _TS_PARSER_CACHE[language_id] = p
+    return _TS_PARSER_CACHE.get(language_id)
+
 class CodeASTParser:
     """Polyglot AST Parser with error protection, scope-aware call graph extraction, and stdio safety."""
 
@@ -131,17 +148,11 @@ class CodeASTParser:
         self.code_bytes = self.code_str.encode("utf-8")
         self.tree = None
 
-        if Parser and self.language_obj and self.code_bytes:
+        if self.language_obj and self.code_bytes:
             try:
-                try:
-                    parser = Parser(self.language_obj)
-                except Exception:
-                    parser = Parser()
-                    if hasattr(parser, "language"):
-                        parser.language = self.language_obj
-                    elif hasattr(parser, "set_language"):
-                        parser.set_language(self.language_obj)
-                self.tree = parser.parse(self.code_bytes)
+                parser = _get_reusable_parser(self.language_obj, self.language_id)
+                if parser:
+                    self.tree = parser.parse(self.code_bytes)
             except Exception as e:
                 self.log(f"⚠️ Tree-sitter parsing error for '{filepath}': {e}")
                 self.tree = None
@@ -177,6 +188,9 @@ class CodeASTParser:
             structures = self._fallback_extract()
 
         structures["calls"] = self._deduplicate_calls(structures["calls"])
+        self.tree = None
+        self.code_bytes = None
+        self.code_str = None
         return structures
 
     def parse(self) -> Dict[str, List[Dict[str, Any]]]:

@@ -366,7 +366,7 @@ class RepositoryIngestor:
     def _index_files(
         self, base_dir: str, files: List[Path], workspace_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Processes source files through vector store and graph store pipelines."""
+        """Processes source files through vector store and graph store in a strict single-pass streaming pipeline."""
         import gc
         ws = workspace_id or "global"
         base_path = Path(base_dir).resolve()
@@ -384,68 +384,56 @@ class RepositoryIngestor:
             except Exception as e:
                 self.log(f"⚠️ Graph store pre-index purge notice for {ws}: {e}")
 
-        # Pass 1: Parse AST structures without holding full file texts in RAM
-        parsed: List[Dict[str, Any]] = []
+        indexed_graph_nodes = 0
+        indexed_graph_edges = 0
+        indexed_vectors = 0
         lang_counts: Counter = Counter()
-        for file_path in files:
+        pending_vector_items: List[Dict[str, Any]] = []
+        BATCH_FLUSH_SIZE = 16
+
+        for idx, file_path in enumerate(files):
             rel_path = str(file_path.relative_to(base_path))
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
                 if not content.strip():
                     continue
-                # Note: Content is intentionally NOT stored in parsed to keep RAM strictly bounded
-                parsed.append({
-                    "rel": rel_path,
-                    "path": file_path,
-                    "ast": self._parse_ast(file_path, content, rel_path),
-                })
-                del content
+
                 if file_path.suffix.lower() in LANGUAGE_NAMES:
                     lang_counts[LANGUAGE_NAMES[file_path.suffix.lower()]] += 1
-            except Exception as file_err:
-                self.log(f"⚠️ Skipping file '{rel_path}': {file_err}")
 
-        # Pass 2: Link cross-file caller and callee definitions across the graph
-        resolve_calls(parsed)
+                # 1. Parse AST structures
+                ast_data = self._parse_ast(file_path, content, rel_path)
+                symbols = []
+                if ast_data:
+                    symbols = sorted({
+                        n for n in (
+                            [c.get("name") for c in ast_data.get("classes", [])]
+                            + [f.get("short_name") or f.get("name") for f in ast_data.get("functions", [])]
+                        ) if n and n != "unnamed_entity" and "anon_" not in n and "lambda_" not in n
+                    })
 
-        indexed_graph_nodes = indexed_graph_edges = 0
-        indexed_vectors = 0
-        pending_vector_items: List[Dict[str, Any]] = []
-        BATCH_FLUSH_SIZE = 24
+                    # Ingest into Neo4j immediately
+                    if self.graph_store and hasattr(self.graph_store, "ingest_ast"):
+                        try:
+                            self.graph_store.ingest_ast(rel_path, ast_data, workspace_id=ws)
+                        except Exception as g_err:
+                            self.log(f"⚠️ Graph ingest skipped for '{rel_path}': {g_err}")
 
-        for idx, item in enumerate(parsed):
-            rel_path, ast_data = item["rel"], item["ast"]
-            file_path = item["path"]
-            symbols = []
-            if ast_data:
-                symbols = sorted({
-                    n for n in (
-                        [c.get("name") for c in ast_data.get("classes", [])]
-                        + [f.get("short_name") or f.get("name") for f in ast_data.get("functions", [])]
-                    ) if n and n != "unnamed_entity" and "anon_" not in n and "lambda_" not in n
-                })
+                    nodes_count = (
+                        len(ast_data.get("classes", []))
+                        + len(ast_data.get("functions", []))
+                        + len(ast_data.get("imports", []))
+                    )
+                    indexed_graph_nodes += max(1, nodes_count)
+                    indexed_graph_edges += len(ast_data.get("calls", []))
+                    del ast_data
 
-                if self.graph_store and hasattr(self.graph_store, "ingest_ast"):
-                    try:
-                        self.graph_store.ingest_ast(rel_path, ast_data, workspace_id=ws)
-                    except Exception as g_err:
-                        self.log(f"⚠️ Graph ingest skipped for '{rel_path}': {g_err}")
-                nodes_count = (
-                    len(ast_data.get("classes", []))
-                    + len(ast_data.get("functions", []))
-                    + len(ast_data.get("imports", []))
-                )
-                indexed_graph_nodes += max(1, nodes_count)
-                indexed_graph_edges += len(ast_data.get("calls", []))
-
-            # Stream vector chunks file-by-file with immediate micro-batch flushing
-            if self.vector_store:
-                try:
-                    file_content = file_path.read_text(encoding="utf-8", errors="ignore")
-                    for n, (start, end, text) in enumerate(chunk_text(file_content)):
+                # 2. Chunk for Vector Store immediately
+                if self.vector_store:
+                    for n, (start, end, text_snippet) in enumerate(chunk_text(content)):
                         pending_vector_items.append({
                             "doc_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{ws}:{rel_path}:{n}")),
-                            "code_snippet": f"# File: {rel_path}\n{text}",
+                            "code_snippet": f"# File: {rel_path}\n{text_snippet}",
                             "metadata": {
                                 "filepath": rel_path,
                                 "filename": file_path.name,
@@ -456,24 +444,23 @@ class RepositoryIngestor:
                                 "symbols": symbols,
                             },
                         })
-                    del file_content
-                except Exception as read_err:
-                    self.log(f"⚠️ File read notice for vector chunking '{rel_path}': {read_err}")
 
-                # Flush micro-batch to prevent vector payload accumulation in RAM
-                if len(pending_vector_items) >= BATCH_FLUSH_SIZE:
-                    try:
-                        indexed_vectors += self.vector_store.upsert_code_batch(pending_vector_items)
-                    except Exception as vec_err:
-                        self.log(f"⚠️ Vector batch indexing notice: {vec_err}")
-                    pending_vector_items.clear()
+                    # Micro-batch flush to keep memory usage flat
+                    if len(pending_vector_items) >= BATCH_FLUSH_SIZE:
+                        try:
+                            indexed_vectors += self.vector_store.upsert_code_batch(pending_vector_items)
+                        except Exception as vec_err:
+                            self.log(f"⚠️ Vector batch indexing notice: {vec_err}")
+                        pending_vector_items.clear()
 
-            # Free AST memory immediately for this file
-            item["ast"] = None
+                del content
 
-            # Periodic garbage collection to maintain flat memory profile on constrained 512MB RAM
-            if (idx + 1) % 15 == 0:
-                gc.collect()
+                # Periodic garbage collection every 10 files
+                if (idx + 1) % 10 == 0:
+                    gc.collect()
+
+            except Exception as file_err:
+                self.log(f"⚠️ Skipping file '{rel_path}': {file_err}")
 
         # Flush any remaining vector chunks
         if self.vector_store and pending_vector_items:
@@ -483,7 +470,6 @@ class RepositoryIngestor:
                 self.log(f"⚠️ Final vector batch indexing notice: {vec_err}")
             pending_vector_items.clear()
 
-        del parsed
         gc.collect()
 
         return {
@@ -492,6 +478,4 @@ class RepositoryIngestor:
             "graph_edges": indexed_graph_edges,
             "languages": [name for name, _ in lang_counts.most_common(3)],
         }
-
-
 RepoIngestor = RepositoryIngestor
