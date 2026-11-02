@@ -56,6 +56,10 @@ async function request(path, { method = 'GET', json, form, retries = 2 } = {}) {
 
   const data = await res.json().catch(() => null);
   if (!res.ok) {
+    if (res.status === 401 && path !== '/api/auth/login' && path !== '/api/auth/register') {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem('codegraph_selected_ws_id');
+    }
     throw new Error(formatDetail(data?.detail) || `Request failed (${res.status})`);
   }
   return data;
