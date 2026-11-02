@@ -614,16 +614,64 @@ class Neo4jGraphStore:
         if not self.driver:
             return {"connected": False, "nodes": [], "edges": [], "message": "Neo4j driver not connected."}
 
-        # Query explicit relationships first to ensure full connectivity and typed edges
+        # Stratified query across relationship tiers to ensure a balanced, readable architecture constellation:
+        # 1. Inheritance & Interfaces ([:EXTENDS], [:IMPLEMENTS])
+        # 2. File containment hierarchy ([:CONTAINS_CLASS], [:CONTAINS_FUNCTION])
+        # 3. Class structure ([:HAS_METHOD])
+        # 4. Cross-file imports ([:IMPORTS])
+        # 5. Connected call flows ([:CALLS])
         cypher = """
-        MATCH (n)-[r]->(m) WHERE ($ws IS NULL OR n.ws = $ws)
-        RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
-        LIMIT $limit
+        CALL () {
+            MATCH (n)-[r:EXTENDS|IMPLEMENTS]->(m)
+            WHERE ($ws IS NULL OR n.ws = $ws)
+            RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
+            LIMIT 25
+        }
+        RETURN n, n_labels, r, r_type, m, m_labels
+        UNION
+        CALL () {
+            MATCH (n)-[r:CONTAINS_CLASS|CONTAINS_FUNCTION]->(m)
+            WHERE ($ws IS NULL OR n.ws = $ws)
+            RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
+            LIMIT 60
+        }
+        RETURN n, n_labels, r, r_type, m, m_labels
+        UNION
+        CALL () {
+            MATCH (n)-[r:HAS_METHOD]->(m)
+            WHERE ($ws IS NULL OR n.ws = $ws)
+            RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
+            LIMIT 40
+        }
+        RETURN n, n_labels, r, r_type, m, m_labels
+        UNION
+        CALL () {
+            MATCH (n)-[r:IMPORTS]->(m)
+            WHERE ($ws IS NULL OR n.ws = $ws)
+            RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
+            LIMIT 50
+        }
+        RETURN n, n_labels, r, r_type, m, m_labels
+        UNION
+        CALL () {
+            MATCH (n)-[r:CALLS]->(m)
+            WHERE ($ws IS NULL OR n.ws = $ws)
+            RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
+            LIMIT 150
+        }
+        RETURN n, n_labels, r, r_type, m, m_labels
         """
 
         try:
             with self.driver.session() as session:
-                records = list(session.run(cypher, ws=workspace_id, limit=limit))
+                try:
+                    records = list(session.run(cypher, ws=workspace_id))
+                except Exception:
+                    # Fallback for simpler Neo4j runtimes without subqueries
+                    records = list(session.run(
+                        "MATCH (n)-[r]->(m) WHERE ($ws IS NULL OR n.ws = $ws) RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels LIMIT $limit",
+                        ws=workspace_id, limit=limit
+                    ))
                 nodes_map = {}
                 edges = []
 
@@ -683,11 +731,12 @@ class Neo4jGraphStore:
                         nodes_map[node_m["id"]] = node_m
 
                     if node_n and node_m and r is not None:
+                        clean_type = r_type.replace("CONTAINS_CLASS", "CONTAINS").replace("CONTAINS_FUNCTION", "CONTAINS")
                         edges.append({
                             "from": node_n["id"],
                             "to": node_m["id"],
-                            "label": f"[:{r_type}]",
-                            "relationType": r_type.replace("CONTAINS_CLASS", "CONTAINS").replace("CONTAINS_FUNCTION", "CONTAINS"),
+                            "label": f"[:{clean_type}]",
+                            "relationType": clean_type,
                         })
 
                 if not nodes_map:
