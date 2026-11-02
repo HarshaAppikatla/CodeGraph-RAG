@@ -454,6 +454,8 @@ class RepositoryIngestor:
                         pending_vector_items.clear()
 
                 del content
+                if (idx + 1) % 25 == 0 or (idx + 1) == len(files):
+                    self.log(f"📊 Progress: Indexed {idx + 1}/{len(files)} files into Neo4j & Qdrant ({indexed_graph_nodes} nodes, {indexed_vectors} vectors)...")
 
                 # Periodic garbage collection every 10 files
                 if (idx + 1) % 10 == 0:

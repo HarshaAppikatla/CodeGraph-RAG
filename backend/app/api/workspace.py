@@ -144,6 +144,10 @@ def _finish_ingestion(workspace_id: str, res: dict) -> None:
                 languages = summary.get("languages") or []
                 ws.language = " / ".join(languages[:2]) if languages else "Polyglot"
                 INGEST_ERRORS.pop(ws.id, None)
+                logger.info(
+                    "🎉 Workspace %s ingestion READY: %d files, %d nodes, %d edges, %d vectors",
+                    ws.id, ws.files_count, ws.nodes_count, ws.edges_count, summary.get("vector_chunks", 0)
+                )
             db.commit()
     except Exception as e:
         logger.exception("Failed to finish ingestion for workspace %s: %s", workspace_id, e)
