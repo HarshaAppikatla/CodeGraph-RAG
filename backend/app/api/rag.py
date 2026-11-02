@@ -605,7 +605,7 @@ def get_architecture_graph(
 # ---------------------------------------------------------------------------
 
 
-def _demo_answer(query: str, model_alias: str = "gemini-2.0-flash", execution_time: float = 0.04) -> Dict[str, Any]:
+def _demo_answer(query: str, model_alias: str = "gemini-3.8-flash", execution_time: float = 0.04) -> Dict[str, Any]:
     q_lower = query.lower()
     is_code_query = any(k in q_lower for k in [
         "token", "jwt", "auth", "login", "register", "service", "blast", "radius",
@@ -893,7 +893,7 @@ THINKING_BUDGETS = {
 def format_litellm_model(model_name: str, provider: str = "gemini") -> str:
     """Ensures proper provider namespace prefix formatting for LiteLLM routing."""
     if not model_name:
-        return "gemini/gemini-2.0-flash"
+        return "gemini/gemini-3.8-flash"
 
     prov = (provider or "").lower().strip()
     raw = model_name.strip()
@@ -905,6 +905,10 @@ def format_litellm_model(model_name: str, provider: str = "gemini") -> str:
             if not prov:
                 prov = p
             break
+
+    # Transparently map deprecated gemini-2.0-flash to the active gemini-3.8-flash
+    if "2.0-flash" in raw.lower():
+        raw = "gemini-3.8-flash"
 
     if not prov:
         if any(k in raw.lower() for k in ["llama", "mixtral", "qwen"]):
@@ -932,7 +936,7 @@ def completion_with_telemetry(
     import time
     t0 = time.time()
 
-    litellm_model = format_litellm_model(model_alias or "gemini-2.0-flash", provider)
+    litellm_model = format_litellm_model(model_alias or "gemini-3.8-flash", provider)
 
     import litellm
 
@@ -1113,7 +1117,9 @@ def run_hybrid_rag_query(
     )
     
     # Resolve model and provider from either req.model or req.model_id
-    raw_model = (req.model or req.model_id or "gemini-2.0-flash").strip()
+    raw_model = (req.model or req.model_id or "gemini-3.8-flash").strip()
+    if "2.0-flash" in raw_model.lower():
+        raw_model = "gemini-3.8-flash"
     provider = (req.provider or "").lower().strip()
 
     if "/" in raw_model:

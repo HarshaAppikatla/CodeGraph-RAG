@@ -202,7 +202,7 @@ export default function HybridRAGSearch({
     const payload = {
       workspace_id: activeWorkspace,
       query: query,
-      model_id: selectedModel?.id || 'gemini-2.0-flash',
+      model_id: selectedModel?.id || 'gemini-3.8-flash',
       provider: provider,
       thinking_level: thinkingLevel,
       history: historyPayload,

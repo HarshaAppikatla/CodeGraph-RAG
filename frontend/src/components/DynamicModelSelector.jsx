@@ -14,8 +14,8 @@ import { getKeyStatus, getDiscoveredModels } from '../services/api';
 
 export const AVAILABLE_MODELS = [
   {
-    id: 'gemini-2.0-flash',
-    name: 'Gemini 2.0 Flash',
+    id: 'gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash',
     provider: 'gemini',
     tier: 'Fast Reasoning',
     description: 'Next-gen multimodal, low latency & thinking capabilities',

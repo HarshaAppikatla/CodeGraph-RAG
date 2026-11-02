@@ -67,11 +67,11 @@ def _compute_status_map(existing_keys: Dict[str, str]) -> Dict[str, bool]:
 # Baseline curated production models (used as defaults or when offline)
 DEFAULT_CURATED_MODELS = [
     {
-        "id": "gemini-2.0-flash",
-        "name": "Gemini 2.0 Flash",
+        "id": "gemini-3.8-flash",
+        "name": "Gemini 3.8 Flash",
         "provider": "gemini",
         "tier": "Fast Reasoning",
-        "description": "Next-gen multimodal, low latency & thinking capabilities",
+        "description": "Next-gen multimodal, ultra low latency & code intelligence",
         "recommended": True,
         "active": True,
     },
@@ -398,28 +398,29 @@ def _fetch_gemini_models(api_key: str) -> List[Dict[str, Any]]:
                     "tier": tier,
                     "description": desc,
                     "active": True,
-                    "recommended": "2.0-flash" in mid,
+                    "recommended": any(k in mid for k in ["3.8-flash", "flash-latest"]),
                     "discovered": True,
                 })
             
             # Ensure primary production models are represented
-            if not any("2.0-flash" in m["id"] for m in models):
+            if not any("3.8-flash" in m["id"] for m in models):
                 models.insert(0, {
-                    "id": "gemini-2.0-flash",
-                    "name": "Gemini 2.0 Flash",
+                    "id": "gemini-3.8-flash",
+                    "name": "Gemini 3.8 Flash",
                     "provider": "gemini",
                     "tier": "Fast Reasoning",
-                    "description": "Next-gen multimodal, low latency & thinking capabilities",
+                    "description": "Next-gen multimodal, ultra low latency & code intelligence",
                     "active": True,
                     "recommended": True,
                     "discovered": True,
                 })
 
             models.sort(key=lambda m: (
-                0 if m["id"] == "gemini-2.0-flash" else
+                0 if m["id"] == "gemini-3.8-flash" else
                 1 if m["id"] == "gemini-2.5-flash" else
-                2 if m["id"] == "gemini-2.5-pro" else
-                3 if m["id"] == "gemini-1.5-pro" else 4,
+                2 if m["id"] == "gemini-flash-latest" else
+                3 if m["id"] == "gemini-2.5-pro" else
+                4 if m["id"] == "gemini-1.5-pro" else 5,
                 m["name"]
             ))
             # Keep top 8 concise models to avoid UI clutter
