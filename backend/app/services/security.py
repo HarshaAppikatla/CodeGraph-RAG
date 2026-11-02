@@ -217,4 +217,7 @@ def get_user_encrypted_keys(user: Optional[Any] = None, user_id: Optional[str] =
         return keys
     finally:
         if needs_db_close and db:
-            db.close()
+            try:
+                db.close()
+            except Exception:
+                pass

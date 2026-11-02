@@ -2,6 +2,7 @@ import os
 import sys
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy.pool import NullPool
 from backend.app.config import settings
 
 Base = declarative_base()
@@ -15,14 +16,40 @@ if db_url.startswith("postgres://"):
 elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+"):
     db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
 
-engine_kwargs = {"pool_pre_ping": True}
 if db_url.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
+    engine_kwargs = {
+        "pool_pre_ping": True,
+        "connect_args": {"check_same_thread": False},
+    }
+elif "-pooler" in db_url:
+    # Recommended for Neon / cloud PostgreSQL with PgBouncer connection pooling:
+    # Use NullPool because PgBouncer handles connection pooling on the server side.
+    # This prevents idle client-side connection pooling conflicts and SSL drop errors.
+    engine_kwargs = {
+        "poolclass": NullPool,
+        "connect_args": {
+            "connect_timeout": 15,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
+    }
 else:
-    # Recommended for Neon / cloud PostgreSQL with connection pooling
-    engine_kwargs["pool_recycle"] = 300
-    engine_kwargs["pool_size"] = 5
-    engine_kwargs["max_overflow"] = 2
+    # Direct / non-pooler cloud PostgreSQL
+    engine_kwargs = {
+        "pool_pre_ping": True,
+        "pool_recycle": 60,
+        "pool_size": 5,
+        "max_overflow": 2,
+        "connect_args": {
+            "connect_timeout": 15,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
+    }
 
 try:
     engine = create_engine(db_url, **engine_kwargs)
@@ -43,8 +70,20 @@ def get_db():
     db: Session = SessionLocal()
     try:
         yield db
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            try:
+                db.invalidate()
+            except Exception:
+                pass
 
 
 def init_db():
