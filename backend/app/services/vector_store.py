@@ -73,6 +73,7 @@ class CodeVectorStore:
                     cache_dir=cache_dir,
                     threads=1,
                     lazy_load=True,
+                    enable_cpu_mem_arena=False,
                 )
                 self.vector_size = 384
                 self.log("✅ FastEmbed ONNX model ready (constrained to 1 thread & low memory).")
@@ -182,10 +183,10 @@ class CodeVectorStore:
             return [[0.0] * self.vector_size for _ in texts]
         try:
             if hasattr(embedder, "embed"):
-                vectors = list(embedder.embed(texts, batch_size=8))
+                vectors = list(embedder.embed(texts, batch_size=4))
                 return [v.tolist() for v in vectors]
             else:
-                vectors = embedder.encode(texts, convert_to_numpy=True, batch_size=8, show_progress_bar=False)
+                vectors = embedder.encode(texts, convert_to_numpy=True, batch_size=4, show_progress_bar=False)
                 return vectors.tolist()
         except Exception as e:
             self.log(f"⚠️ Batch embedding generation error: {e}")
@@ -228,7 +229,7 @@ class CodeVectorStore:
             return 0
 
         total_upserted = 0
-        chunk_size = 16
+        chunk_size = 12
         for i in range(0, len(valid_items), chunk_size):
             chunk_items = valid_items[i:i + chunk_size]
             texts = [item["code_snippet"] for item in chunk_items]
@@ -249,8 +250,13 @@ class CodeVectorStore:
 
                 self.qdrant.upsert(collection_name=self.collection_name, points=points)
                 total_upserted += len(points)
+                del points
+                del vectors
             except Exception as e:
                 self.log(f"⚠️ Vector batch upsert notice (chunk {i}): {e}")
+            finally:
+                import gc
+                gc.collect()
 
         return total_upserted
 

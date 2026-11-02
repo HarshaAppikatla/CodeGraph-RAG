@@ -41,6 +41,7 @@ LANGUAGE_NAMES = {
 CHUNK_LINES = 60
 CHUNK_OVERLAP = 10
 MAX_AMBIGUOUS_CALLEES = 5
+MAX_INDEXABLE_SOURCE_FILES = 300
 
 
 def chunk_text(content: str, size: int = CHUNK_LINES, overlap: int = CHUNK_OVERLAP) -> List[Tuple[int, int, str]]:
@@ -266,6 +267,10 @@ class RepositoryIngestor:
                 pass
 
             source_files = self.collect_source_files(temp_dir)
+            if len(source_files) > MAX_INDEXABLE_SOURCE_FILES:
+                self.log(f"ℹ️ Repository contains {len(source_files)} files; prioritizing top {MAX_INDEXABLE_SOURCE_FILES} code files to maintain high stability on free-tier memory.")
+                source_files.sort(key=lambda p: 0 if p.suffix.lower() in LANGUAGE_MODULE_MAP else 1)
+                source_files = source_files[:MAX_INDEXABLE_SOURCE_FILES]
             self.log(f"✅ Found {len(source_files)} source files for indexing on branch '{actual_branch}'.")
             indexing_summary = self._index_files(temp_dir, source_files, workspace_id)
             return {
@@ -322,6 +327,10 @@ class RepositoryIngestor:
 
                     zip_ref.extract(member, temp_dir)
             source_files = self.collect_source_files(temp_dir)
+            if len(source_files) > MAX_INDEXABLE_SOURCE_FILES:
+                self.log(f"ℹ️ ZIP contains {len(source_files)} files; prioritizing top {MAX_INDEXABLE_SOURCE_FILES} code files to maintain high stability on free-tier memory.")
+                source_files.sort(key=lambda p: 0 if p.suffix.lower() in LANGUAGE_MODULE_MAP else 1)
+                source_files = source_files[:MAX_INDEXABLE_SOURCE_FILES]
             self.log(f"✅ Found {len(source_files)} source files for indexing.")
             indexing_summary = self._index_files(temp_dir, source_files, workspace_id)
             return {
@@ -358,6 +367,7 @@ class RepositoryIngestor:
         self, base_dir: str, files: List[Path], workspace_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Processes source files through vector store and graph store pipelines."""
+        import gc
         ws = workspace_id or "global"
         base_path = Path(base_dir).resolve()
 
@@ -374,7 +384,7 @@ class RepositoryIngestor:
             except Exception as e:
                 self.log(f"⚠️ Graph store pre-index purge notice for {ws}: {e}")
 
-        # Pass 1: read + parse every file
+        # Pass 1: Parse AST structures without holding full file texts in RAM
         parsed: List[Dict[str, Any]] = []
         lang_counts: Counter = Counter()
         for file_path in files:
@@ -383,24 +393,29 @@ class RepositoryIngestor:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
                 if not content.strip():
                     continue
+                # Note: Content is intentionally NOT stored in parsed to keep RAM strictly bounded
                 parsed.append({
                     "rel": rel_path,
                     "path": file_path,
-                    "content": content,
                     "ast": self._parse_ast(file_path, content, rel_path),
                 })
+                del content
                 if file_path.suffix.lower() in LANGUAGE_NAMES:
                     lang_counts[LANGUAGE_NAMES[file_path.suffix.lower()]] += 1
             except Exception as file_err:
                 self.log(f"⚠️ Skipping file '{rel_path}': {file_err}")
 
-        # Pass 2: link calls to their definitions across the whole repository
+        # Pass 2: Link cross-file caller and callee definitions across the graph
         resolve_calls(parsed)
 
         indexed_graph_nodes = indexed_graph_edges = 0
-        batch_vector_items = []
-        for item in parsed:
-            rel_path, content, ast_data = item["rel"], item["content"], item["ast"]
+        indexed_vectors = 0
+        pending_vector_items: List[Dict[str, Any]] = []
+        BATCH_FLUSH_SIZE = 24
+
+        for idx, item in enumerate(parsed):
+            rel_path, ast_data = item["rel"], item["ast"]
+            file_path = item["path"]
             symbols = []
             if ast_data:
                 symbols = sorted({
@@ -423,38 +438,53 @@ class RepositoryIngestor:
                 indexed_graph_nodes += max(1, nodes_count)
                 indexed_graph_edges += len(ast_data.get("calls", []))
 
+            # Stream vector chunks file-by-file with immediate micro-batch flushing
             if self.vector_store:
-                for n, (start, end, text) in enumerate(chunk_text(content)):
-                    batch_vector_items.append({
-                        # Deterministic per (workspace, file, chunk): re-ingest overwrites, repos never collide
-                        "doc_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{ws}:{rel_path}:{n}")),
-                        "code_snippet": f"# File: {rel_path}\n{text}",
-                        "metadata": {
-                            "filepath": rel_path,
-                            "filename": item["path"].name,
-                            "extension": item["path"].suffix,
-                            "workspace_id": ws,
-                            "start_line": start,
-                            "end_line": end,
-                            "symbols": symbols,
-                        },
-                    })
+                try:
+                    file_content = file_path.read_text(encoding="utf-8", errors="ignore")
+                    for n, (start, end, text) in enumerate(chunk_text(file_content)):
+                        pending_vector_items.append({
+                            "doc_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{ws}:{rel_path}:{n}")),
+                            "code_snippet": f"# File: {rel_path}\n{text}",
+                            "metadata": {
+                                "filepath": rel_path,
+                                "filename": file_path.name,
+                                "extension": file_path.suffix,
+                                "workspace_id": ws,
+                                "start_line": start,
+                                "end_line": end,
+                                "symbols": symbols,
+                            },
+                        })
+                    del file_content
+                except Exception as read_err:
+                    self.log(f"⚠️ File read notice for vector chunking '{rel_path}': {read_err}")
 
-        indexed_vectors = 0
-        if self.vector_store and batch_vector_items:
+                # Flush micro-batch to prevent vector payload accumulation in RAM
+                if len(pending_vector_items) >= BATCH_FLUSH_SIZE:
+                    try:
+                        indexed_vectors += self.vector_store.upsert_code_batch(pending_vector_items)
+                    except Exception as vec_err:
+                        self.log(f"⚠️ Vector batch indexing notice: {vec_err}")
+                    pending_vector_items.clear()
+
+            # Free AST memory immediately for this file
+            item["ast"] = None
+
+            # Periodic garbage collection to maintain flat memory profile on constrained 512MB RAM
+            if (idx + 1) % 15 == 0:
+                gc.collect()
+
+        # Flush any remaining vector chunks
+        if self.vector_store and pending_vector_items:
             try:
-                if hasattr(self.vector_store, "upsert_code_batch"):
-                    indexed_vectors = self.vector_store.upsert_code_batch(batch_vector_items)
+                indexed_vectors += self.vector_store.upsert_code_batch(pending_vector_items)
             except Exception as vec_err:
-                self.log(f"⚠️ Vector batch indexing notice: {vec_err}")
+                self.log(f"⚠️ Final vector batch indexing notice: {vec_err}")
+            pending_vector_items.clear()
 
-        try:
-            del parsed
-            del batch_vector_items
-            import gc
-            gc.collect()
-        except Exception:
-            pass
+        del parsed
+        gc.collect()
 
         return {
             "vector_chunks": indexed_vectors,
