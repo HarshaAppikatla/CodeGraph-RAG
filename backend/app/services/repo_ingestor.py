@@ -17,7 +17,7 @@ from backend.app.config import settings
 # Default directory & file patterns to ignore during ingestion
 DEFAULT_IGNORE_PATTERNS = {
     ".git", ".github", ".idea", ".vscode", "__pycache__", "node_modules",
-    "venv", ".venv", "build", "dist", "target", "qdrant_data", ".DS_Store",
+    "venv", ".venv", "build", "dist", "target", "qdrant_data", ".DS_Store", "fixtures", "mock_data", "scratch",
     ".next",
 }
 
@@ -159,6 +159,11 @@ class RepositoryIngestor:
                     continue
                 valid_files.append(path)
         return valid_files
+
+    def ingest_local_directory(self, root_dir: str, workspace_id: Optional[str] = None) -> Dict[str, Any]:
+        """Indexes an existing local workspace directory into Vector & Graph stores."""
+        source_files = self.collect_source_files(root_dir)
+        return self._index_files(root_dir, source_files, workspace_id=workspace_id)
 
     def ingest_git_repo(
         self, repo_url: str, branch: Optional[str] = None, workspace_id: Optional[str] = None

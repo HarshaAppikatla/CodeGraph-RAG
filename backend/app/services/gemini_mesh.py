@@ -16,7 +16,8 @@ DEFAULT_PREFERRED_CHAIN = [
     "gemini-flash-latest",
     "gemini-3.7-flash",
     "gemini-3.8-flash",
-    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-1.5-flash",
 ]
 
 
@@ -31,7 +32,7 @@ class DynamicModelMesh:
         self.client = genai.Client(api_key=api_key)
         self.preferred_priority = preferred_priority or DEFAULT_PREFERRED_CHAIN
         self.cooldowns: Dict[str, float] = {}
-        self.cooldown_duration = 60  # seconds
+        self.cooldown_duration = 20  # seconds
 
         # Step 1: Discover and validate available models once on startup
         self.active_chain = self._build_validated_chain()
@@ -58,7 +59,7 @@ class DynamicModelMesh:
             logger.warning("Could not fetch remote models (%s). Falling back to preferred list.", e)
             return self.preferred_priority
 
-    def generate_content(self, prompt: str, json_mode: bool = False, timeout_ms: int = 15000) -> str:
+    def generate_content(self, prompt: str, json_mode: bool = False, timeout_ms: int = 90000) -> str:
         """Executes prompt against the highest priority available model, falling back dynamically."""
         errors: Dict[str, str] = {}
         config = types.GenerateContentConfig(

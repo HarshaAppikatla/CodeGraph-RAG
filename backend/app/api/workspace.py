@@ -1,3 +1,4 @@
+from backend.app.fixtures.demo_data import DEMO_WORKSPACES, DEMO_SYMBOLS_LIST
 import logging
 import os
 import tempfile
@@ -62,34 +63,6 @@ class WorkspaceResponse(BaseModel):
     error: Optional[str] = None
 
 
-DEMO_WORKSPACES = [
-    {
-        "id": "ws-study-sync",
-        "name": "Study-Sync Backend",
-        "repoUrl": "https://github.com/HarshaAppikatla/Study-Sync",
-        "type": "git",
-        "branch": "main",
-        "filesCount": 211,
-        "nodesCount": 2533,
-        "edgesCount": 1195,
-        "lastIndexed": "Just now",
-        "status": "READY",
-        "language": "Java / Spring Boot",
-    },
-    {
-        "id": "ws-payment-gw",
-        "name": "Payment-Gateway Microservice",
-        "repoUrl": "payment-gateway-service.zip",
-        "type": "zip",
-        "branch": "release/v2.1",
-        "filesCount": 148,
-        "nodesCount": 1820,
-        "edgesCount": 840,
-        "lastIndexed": "2 hours ago",
-        "status": "READY",
-        "language": "Go / gRPC",
-    },
-]
 
 
 def _to_response(ws: Workspace) -> WorkspaceResponse:
@@ -339,11 +312,7 @@ def list_workspace_symbols(
     if any(dw["id"] == workspace_id for dw in DEMO_WORKSPACES):
         return {
             "status": "READY",
-            "symbols": [
-                {"name": "generateToken", "file": "studysync-backend/src/main/java/com/studysync/studysyncbackend/service/JwtService.java"},
-                {"name": "authenticate", "file": "studysync-backend/src/main/java/com/studysync/studysyncbackend/service/AuthenticationService.java"},
-                {"name": "registerStompEndpoints", "file": "studysync-backend/src/main/java/com/studysync/studysyncbackend/config/WebSocketConfig.java"},
-            ],
+            "symbols": DEMO_SYMBOLS_LIST,
         }
     ws = _owned_workspace(db, workspace_id, current_user)
     symbols = []
