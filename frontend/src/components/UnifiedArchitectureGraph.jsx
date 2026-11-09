@@ -553,11 +553,10 @@ export const UnifiedArchitectureGraph = ({
               <button
                 key={relKey}
                 onClick={() => setActiveRelations(prev => ({ ...prev, [relKey]: !prev[relKey] }))}
-                className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold flex items-center space-x-1 transition border ${
-                  isActive
+                className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold flex items-center space-x-1 transition border ${isActive
                     ? 'bg-slate-900 border-slate-700 text-slate-200 shadow-sm'
                     : 'bg-slate-950/40 border-slate-800/60 text-slate-600 line-through'
-                }`}
+                  }`}
                 style={isActive ? { borderLeftColor: style.color, borderLeftWidth: '3px' } : {}}
                 title={style.description}
               >

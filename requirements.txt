@@ -4,3 +4,5 @@ neo4j
 qdrant-client
 python-dotenv
 ragas
+bcrypt>=4.0.0,<4.1.0
+passlib>=1.7.4

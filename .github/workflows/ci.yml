@@ -29,7 +29,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio httpx fastapi uvicorn sqlalchemy pydantic-settings passlib bcrypt python-jose python-multipart fastembed sentence-transformers
+          pip install pytest pytest-asyncio httpx fastapi uvicorn sqlalchemy pydantic-settings passlib "bcrypt<4.1.0" python-jose python-multipart fastembed sentence-transformers
 
       - name: Run Pytest Test Suite
         env:

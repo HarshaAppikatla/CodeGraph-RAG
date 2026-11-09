@@ -26,6 +26,21 @@ from backend.app.services.security import (
 logger = logging.getLogger("codegraph.auth")
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
+# Fix for passlib compatibility with bcrypt >= 4.1.0:
+# bcrypt 4.1.0+ raises ValueError on passwords > 72 bytes.
+# passlib (unmaintained since 2020) checks for a wrap bug by hashing a 255-byte string,
+# which causes a fatal ValueError crash during passlib initialization on bcrypt >= 4.1.0.
+# We patch bcrypt.hashpw to gracefully truncate to 72 bytes.
+import bcrypt
+_orig_hashpw = bcrypt.hashpw
+def _safe_hashpw(password, salt):
+    if isinstance(password, str):
+        password = password.encode("utf-8")
+    if len(password) > 72:
+        password = password[:72]
+    return _orig_hashpw(password, salt)
+bcrypt.hashpw = _safe_hashpw
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
 
