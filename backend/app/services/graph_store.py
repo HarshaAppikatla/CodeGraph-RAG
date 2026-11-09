@@ -14,10 +14,15 @@ class Neo4jGraphStore:
         uri: Optional[str] = None,
         user: Optional[str] = None,
         password: Optional[str] = None,
+        auth: Optional[Any] = None,
     ):
         self.uri = uri or settings.NEO4J_URI
-        self.user = user or settings.neo4j_user
-        self.password = password or settings.NEO4J_PASSWORD
+        if auth and isinstance(auth, (tuple, list)) and len(auth) >= 2:
+            self.user = auth[0]
+            self.password = auth[1]
+        else:
+            self.user = user or settings.neo4j_user
+            self.password = password or settings.NEO4J_PASSWORD
         self.driver: Optional[Driver] = None
         self._connect()
         atexit.register(self.close)
@@ -257,17 +262,22 @@ class Neo4jGraphStore:
             "message": "Neo4j driver not connected or node not found.",
         }
 
-        if not self.driver or not workspace_id or not str(workspace_id).strip():
+        if not self.driver:
             return default_res
-        clean_ws = str(workspace_id).strip()
+        clean_ws = str(workspace_id).strip() if workspace_id and str(workspace_id).strip() else None
 
         safe_hops = min(5, max(1, int(max_hops)))
+        ws_target_clause = "{ws: $ws}" if clean_ws else ""
+        ws_file_clause = "{ws: $ws}" if clean_ws else ""
+        cypher_params = {"symbol": symbol}
+        if clean_ws:
+            cypher_params["ws"] = clean_ws
 
         cypher_query = f"""
-        MATCH (target:Function|Class {{ws: $ws}})
+        MATCH (target:Function|Class {ws_target_clause})
         WHERE (target.name = $symbol OR target.short_name = $symbol OR target.name ENDS WITH ('.' + $symbol))
 
-        OPTIONAL MATCH (f:File {{ws: $ws}})-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
+        OPTIONAL MATCH (f:File {ws_file_clause})-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
 
         CALL {{
             WITH target
@@ -503,29 +513,50 @@ class Neo4jGraphStore:
             "message": "Neo4j driver not connected or node not found.",
         }
 
-        if not self.driver or not workspace_id or not str(workspace_id).strip():
+        if not self.driver:
             return default_res
-        clean_ws = str(workspace_id).strip()
+        clean_ws = str(workspace_id).strip() if workspace_id and str(workspace_id).strip() else None
 
-        cypher = """
-        MATCH (target:Function|Class {ws: $ws})
-        WHERE (target.name = $symbol OR target.short_name = $symbol OR target.name ENDS WITH ('.' + $symbol))
-        OPTIONAL MATCH (f:File {ws: $ws})-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
-        CALL {
-            WITH target
-            OPTIONAL MATCH (caller:Function {ws: target.ws})-[:CALLS*1..5]->(target)
-            RETURN collect(DISTINCT caller.name) AS direct_and_transitive_callers
-        }
-        CALL {
-            WITH target
-            OPTIONAL MATCH (sub:Class {ws: target.ws})-[:EXTENDS*1..5]->(target)
-            RETURN collect(DISTINCT sub.name) AS child_classes
-        }
-        RETURN target.name AS symbol_name, labels(target) AS symbol_type,
-               direct_and_transitive_callers,
-               child_classes,
-               f.path AS defined_in_file
-        """
+        if clean_ws:
+            cypher = """
+            MATCH (target:Function|Class {ws: $ws})
+            WHERE (target.name = $symbol OR target.short_name = $symbol OR target.name ENDS WITH ('.' + $symbol))
+            OPTIONAL MATCH (f:File {ws: $ws})-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
+            CALL {
+                WITH target
+                OPTIONAL MATCH (caller:Function {ws: target.ws})-[:CALLS*1..5]->(target)
+                RETURN collect(DISTINCT caller.name) AS direct_and_transitive_callers
+            }
+            CALL {
+                WITH target
+                OPTIONAL MATCH (sub:Class {ws: target.ws})-[:EXTENDS*1..5]->(target)
+                RETURN collect(DISTINCT sub.name) AS child_classes
+            }
+            RETURN target.name AS symbol_name, labels(target) AS symbol_type,
+                   direct_and_transitive_callers,
+                   child_classes,
+                   f.path AS defined_in_file
+            """
+        else:
+            cypher = """
+            MATCH (target:Function|Class)
+            WHERE (target.name = $symbol OR target.short_name = $symbol OR target.name ENDS WITH ('.' + $symbol))
+            OPTIONAL MATCH (f:File)-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
+            CALL {
+                WITH target
+                OPTIONAL MATCH (caller:Function {ws: target.ws})-[:CALLS*1..5]->(target)
+                RETURN collect(DISTINCT caller.name) AS direct_and_transitive_callers
+            }
+            CALL {
+                WITH target
+                OPTIONAL MATCH (sub:Class {ws: target.ws})-[:EXTENDS*1..5]->(target)
+                RETURN collect(DISTINCT sub.name) AS child_classes
+            }
+            RETURN target.name AS symbol_name, labels(target) AS symbol_type,
+                   direct_and_transitive_callers,
+                   child_classes,
+                   f.path AS defined_in_file
+            """
 
         try:
             with self.driver.session() as session:
@@ -594,12 +625,13 @@ class Neo4jGraphStore:
 
     def get_file_graph(self, filepath: str, workspace_id: Optional[str] = None) -> Dict[str, Any]:
         """Retrieves structural nodes and edges for a specific file."""
-        if not self.driver or not workspace_id or not str(workspace_id).strip():
-            return {"error": "Workspace ID is required and Neo4j driver must be connected."}
-        clean_ws = str(workspace_id).strip()
+        if not self.driver:
+            return {"error": "Neo4j driver must be connected."}
+        clean_ws = str(workspace_id).strip() if workspace_id and str(workspace_id).strip() else None
 
+        f_filter = "{path: $filepath, ws: $ws}" if clean_ws else "{path: $filepath}"
         cypher = """
-        MATCH (f:File {path: $filepath, ws: $ws})
+        MATCH (f:File F_FILTER)
         CALL {
             WITH f
             OPTIONAL MATCH (f)-[:CONTAINS_CLASS]->(c:Class)
@@ -632,7 +664,7 @@ class Neo4jGraphStore:
                class_methods,
                imports,
                call_edges
-        """
+        """.replace("F_FILTER", f_filter)
 
         try:
             with self.driver.session() as session:
@@ -862,3 +894,28 @@ class Neo4jGraphStore:
         except Exception as e:
             self.log(f"⚠️ Failed to delete Neo4j nodes for workspace '{workspace_id}': {e}")
             raise
+
+    def get_blast_radius(
+        self,
+        symbol_name: str,
+        workspace_id: Optional[str] = None,
+        max_depth: int = 3,
+    ) -> Dict[str, Any]:
+        """Calculates multi-hop blast radius for a symbol across the graph.
+
+        Alias for analyze_blast_radius_with_inheritance to support programmatic usage
+        and developer scripts matching README documentation.
+        """
+        res = self.analyze_blast_radius_with_inheritance(
+            symbol=symbol_name,
+            workspace_id=workspace_id,
+            max_hops=max_depth,
+        )
+        if "total_affected_callers" not in res:
+            res["total_affected_callers"] = len(res.get("affected_callers", []))
+        return res
+
+
+# Backward compatibility and README quickstart export alias
+CodeGraphStore = Neo4jGraphStore
+__all__ = ["Neo4jGraphStore", "CodeGraphStore"]

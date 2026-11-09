@@ -616,14 +616,14 @@ export default function App() {
       setIngestStageText(`Indexing repository ${newWs.name} into Qdrant & Neo4j...`);
       setIngestLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] Workspace '${newWs.name}' created. Extracting AST symbols...`]);
 
-      // Poll workspace status until READY or FAILED (with 90s safety timeout)
+      // Poll workspace status until READY or FAILED (with 10-minute safety timeout)
       let attempts = 0;
-      const maxAttempts = 60; // 60 attempts * 1.5s = 90 seconds timeout
+      const maxAttempts = 400; // 400 attempts * 1.5s = 600s (10 mins) timeout
       const pollInterval = setInterval(async () => {
         attempts++;
         if (attempts > maxAttempts) {
           clearInterval(pollInterval);
-          setUploadError('Repository ingestion timed out after 90 seconds. Please check backend logs.');
+          setUploadError('Repository ingestion timed out after 10 minutes. Please check backend logs.');
           setCurrentScreen('WORKSPACE_SELECT');
           return;
         }
@@ -684,10 +684,15 @@ export default function App() {
             setUploadError(statusWs.error || 'Repository ingestion failed.');
             setCurrentScreen('WORKSPACE_SELECT');
           } else {
-            const prog = Math.min(30 + attempts * 8, 92);
+            const prog = Math.min(30 + Math.floor(attempts * 1.5), 94);
             setIngestProgress(prog);
-            setIngestStageText(`Analyzing polyglot source trees (${statusWs.language || 'detecting'})...`);
-            setIngestLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] Ingestion in progress... (stage ${prog}%)`]);
+            const statusDetail = attempts > 40
+              ? 'Extracting deep call graph, inheritance, and vector embeddings...'
+              : `Analyzing polyglot source trees (${statusWs.language || 'detecting'})...`;
+            setIngestStageText(statusDetail);
+            if (attempts % 8 === 0 || attempts === 1) {
+              setIngestLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] Ingestion in progress... (${statusDetail} ~${prog}%)`]);
+            }
           }
         } catch (pollErr) {
           console.warn("Polling error:", pollErr);
@@ -1879,7 +1884,7 @@ export default function App() {
                 </div>
 
                 {/* GRAPH VIEWPORT: Force D3 or Classic 2D */}
-                {!activeGraph ? (
+                {!activeGraph || !activeGraph.nodes || activeGraph.nodes.length === 0 ? (
                   <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4 bg-slate-950">
                     <div className="h-14 w-14 rounded-2xl bg-slate-900 border border-slate-800 text-cyan-400 flex items-center justify-center shadow-lg">
                       <Search className="h-7 w-7" />
@@ -1911,11 +1916,11 @@ export default function App() {
                     {/* Code Snippet Preview Box */}
                     <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 font-mono text-xs shadow-xl">
                       <div className="flex items-center justify-between text-slate-400 border-b border-slate-800 pb-2 mb-2">
-                        <span>{activeGraph.file}</span>
-                        <span className="text-cyan-400 font-bold">{activeGraph.signature}</span>
+                        <span>{activeGraph?.file || 'Source File'}</span>
+                        <span className="text-cyan-400 font-bold">{activeGraph?.signature || 'Symbol'}</span>
                       </div>
                       <pre className="text-emerald-400/90 overflow-x-auto leading-relaxed">
-                        {activeGraph.codeSnippet}
+                        {activeGraph?.codeSnippet || '// No code snippet preview available.'}
                       </pre>
                     </div>
                   </div>
@@ -1965,9 +1970,9 @@ export default function App() {
                         </defs>
 
                         {/* Render Connecting Directed Call Lines */}
-                        {activeGraph.edges.map((edge, idx) => {
-                          const fromNode = activeGraph.nodes.find(n => n.id === edge.from);
-                          const toNode = activeGraph.nodes.find(n => n.id === edge.to);
+                        {(activeGraph?.edges || []).map((edge, idx) => {
+                          const fromNode = (activeGraph?.nodes || []).find(n => n.id === edge.from);
+                          const toNode = (activeGraph?.nodes || []).find(n => n.id === edge.to);
 
                           if (!fromNode || !toNode) return null;
 
@@ -2017,7 +2022,7 @@ export default function App() {
                         })}
 
                         {/* Render Interactive Graph Nodes */}
-                        {activeGraph.nodes.map((node) => {
+                        {(activeGraph?.nodes || []).map((node) => {
                           const isSelected = selectedNodeId === node.id;
                           const nodeColor = getNodeColor(node.type, blastRadiusActive);
 
@@ -2119,11 +2124,11 @@ export default function App() {
                     {/* Code Snippet Preview Box */}
                     <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 font-mono text-xs shadow-xl mt-3">
                       <div className="flex items-center justify-between text-slate-400 border-b border-slate-800 pb-2 mb-2">
-                        <span>{activeGraph.file}</span>
-                        <span className="text-cyan-400 font-bold">{activeGraph.signature}</span>
+                        <span>{activeGraph?.file || 'Source File'}</span>
+                        <span className="text-cyan-400 font-bold">{activeGraph?.signature || 'Symbol'}</span>
                       </div>
                       <pre className="text-emerald-400/90 overflow-x-auto leading-relaxed">
-                        {activeGraph.codeSnippet}
+                        {activeGraph?.codeSnippet || '// No code snippet preview available.'}
                       </pre>
                     </div>
                   </div>
