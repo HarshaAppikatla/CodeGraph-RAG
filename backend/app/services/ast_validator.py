@@ -1,52 +1,60 @@
 import logging
 from typing import Dict, List, Any, Optional
-from tree_sitter import Language, Parser
 
 logger = logging.getLogger("codegraph.validator")
+
+try:
+    from tree_sitter import Language, Parser
+    TREE_SITTER_AVAILABLE = True
+except ImportError:
+    Language, Parser = None, None
+    TREE_SITTER_AVAILABLE = False
+    logger.debug("tree-sitter core package unavailable; AST syntax validation will be skipped.")
 
 # Supported tree-sitter language bindings
 LANGUAGES: Dict[str, Any] = {}
 
-try:
-    import tree_sitter_java as tsjava
-    LANGUAGES["java"] = Language(tsjava.language())
-except Exception as e:
-    logger.debug(f"Java tree-sitter unavailable: {e}")
+if TREE_SITTER_AVAILABLE:
+    try:
+        import tree_sitter_java as tsjava
+        LANGUAGES["java"] = Language(tsjava.language())
+    except Exception as e:
+        logger.debug(f"Java tree-sitter unavailable: {e}")
 
-try:
-    import tree_sitter_python as tspython
-    LANGUAGES["py"] = Language(tspython.language())
-    LANGUAGES["python"] = LANGUAGES["py"]
-except Exception as e:
-    logger.debug(f"Python tree-sitter unavailable: {e}")
+    try:
+        import tree_sitter_python as tspython
+        LANGUAGES["py"] = Language(tspython.language())
+        LANGUAGES["python"] = LANGUAGES["py"]
+    except Exception as e:
+        logger.debug(f"Python tree-sitter unavailable: {e}")
 
-try:
-    import tree_sitter_javascript as tsjs
-    LANGUAGES["js"] = Language(tsjs.language())
-    LANGUAGES["javascript"] = LANGUAGES["js"]
-except Exception as e:
-    logger.debug(f"JavaScript tree-sitter unavailable: {e}")
+    try:
+        import tree_sitter_javascript as tsjs
+        LANGUAGES["js"] = Language(tsjs.language())
+        LANGUAGES["javascript"] = LANGUAGES["js"]
+    except Exception as e:
+        logger.debug(f"JavaScript tree-sitter unavailable: {e}")
 
-try:
-    import tree_sitter_typescript as tsts
-    LANGUAGES["ts"] = Language(tsts.language_typescript())
-    LANGUAGES["tsx"] = Language(tsts.language_tsx())
-    LANGUAGES["typescript"] = LANGUAGES["ts"]
-except Exception as e:
-    logger.debug(f"TypeScript tree-sitter unavailable: {e}")
+    try:
+        import tree_sitter_typescript as tsts
+        LANGUAGES["ts"] = Language(tsts.language_typescript())
+        LANGUAGES["tsx"] = Language(tsts.language_tsx())
+        LANGUAGES["typescript"] = LANGUAGES["ts"]
+    except Exception as e:
+        logger.debug(f"TypeScript tree-sitter unavailable: {e}")
 
-try:
-    import tree_sitter_go as tsgo
-    LANGUAGES["go"] = Language(tsgo.language())
-except Exception as e:
-    logger.debug(f"Go tree-sitter unavailable: {e}")
+    try:
+        import tree_sitter_go as tsgo
+        LANGUAGES["go"] = Language(tsgo.language())
+    except Exception as e:
+        logger.debug(f"Go tree-sitter unavailable: {e}")
 
-try:
-    import tree_sitter_cpp as tscpp
-    LANGUAGES["cpp"] = Language(tscpp.language())
-    LANGUAGES["c"] = LANGUAGES["cpp"]
-except Exception as e:
-    logger.debug(f"C/C++ tree-sitter unavailable: {e}")
+    try:
+        import tree_sitter_cpp as tscpp
+        LANGUAGES["cpp"] = Language(tscpp.language())
+        LANGUAGES["c"] = LANGUAGES["cpp"]
+    except Exception as e:
+        logger.debug(f"C/C++ tree-sitter unavailable: {e}")
 
 
 def get_language_from_filename(filename: str) -> Optional[str]:
