@@ -161,8 +161,14 @@ class CodeVectorStore:
         try:
             if self.qdrant.collection_exists(self.collection_name):
                 info = self.qdrant.get_collection(self.collection_name)
-                existing_dim = info.config.params.vectors.size
-                if existing_dim != self.vector_size:
+                vectors_param = getattr(getattr(info, "config", None), "params", None)
+                vectors_obj = getattr(vectors_param, "vectors", None)
+                existing_dim = getattr(vectors_obj, "size", None)
+                if existing_dim is None and isinstance(vectors_obj, dict):
+                    first_v = next(iter(vectors_obj.values()), None)
+                    existing_dim = getattr(first_v, "size", None)
+
+                if existing_dim and existing_dim != self.vector_size:
                     self.log(
                         f"⚠️ Vector dimension mismatch ({existing_dim} vs {self.vector_size}). "
                         f"Recreating collection '{self.collection_name}'..."
@@ -483,8 +489,12 @@ class CodeVectorStore:
             self.log(f"⚠️ Qdrant symbol listing notice: {e}")
         return [{"name": n, "file": f} for n, f in sorted(seen.items())][:limit]
 
-    def count_workspace_vectors(self, workspace_id: str) -> int:
-        """Returns the number of vector points stored in Qdrant for this workspace."""
+    def count_workspace_vectors(self, workspace_id: str) -> Optional[int]:
+        """Returns the number of vector points stored in Qdrant for this workspace.
+
+        Returns None on connection or engine failure to prevent callers from
+        mistaking a cold start or transient glitch for permanent data loss.
+        """
         if not workspace_id:
             return 0
         try:
@@ -493,7 +503,7 @@ class CodeVectorStore:
             return getattr(res, "count", 0)
         except Exception as e:
             self.log(f"⚠️ Vector count check error for {workspace_id}: {e}")
-            return 0
+            return None
 
     def delete_workspace(self, workspace_id: str) -> bool:
         """Deletes all vector embeddings associated with a workspace from Qdrant."""

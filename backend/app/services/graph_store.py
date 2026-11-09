@@ -868,17 +868,21 @@ class Neo4jGraphStore:
             self.log(f"⚠️ get_workspace_architecture_graph failed: {e}")
             return {"connected": False, "nodes": [], "edges": [], "message": f"Architecture query failed: {e}"}
 
-    def count_workspace_nodes(self, workspace_id: str) -> int:
-        """Returns the number of nodes stored for this workspace in Neo4j."""
+    def count_workspace_nodes(self, workspace_id: str) -> Optional[int]:
+        """Returns the number of nodes stored for this workspace in Neo4j.
+
+        Returns None if driver is not connected or query fails, preventing callers
+        from misinterpreting engine downtime as permanent data loss.
+        """
         if not self.driver or not workspace_id:
-            return 0
+            return None
         try:
             with self.driver.session() as session:
                 res = session.run("MATCH (n:File|Class|Function|Import|Entity {ws: $ws}) RETURN count(n) as cnt", ws=str(workspace_id).strip()).single()
                 return res["cnt"] if res else 0
         except Exception as e:
             self.log(f"⚠️ Graph count check error for {workspace_id}: {e}")
-            return 0
+            return None
 
     def delete_workspace(self, workspace_id: str) -> int:
         """Permanently deletes all nodes and relationships associated with a workspace from Neo4j."""

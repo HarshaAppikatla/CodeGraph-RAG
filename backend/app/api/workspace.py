@@ -141,10 +141,17 @@ def _finish_ingestion(workspace_id: str, res: dict) -> None:
                         INGEST_ERRORS[ws.id] = ws.error_message
                     elif vector_ok and not graph_ok:
                         ws.status = "PARTIAL"
-                        ws.error_message = (
-                            "Vector embeddings indexed successfully, but graph store writes failed "
-                            "(Neo4j may be down). Blast-radius and impact analysis will not work."
-                        )
+                        gs = get_graph_store()
+                        if not (gs and gs.driver):
+                            ws.error_message = (
+                                "Vector embeddings indexed successfully, but graph store writes failed "
+                                "(Neo4j is down or unreachable). Blast-radius and impact analysis will not work."
+                            )
+                        else:
+                            ws.error_message = (
+                                "Vector embeddings indexed successfully. No AST-parsable symbols (functions, classes) "
+                                "were detected in this repository. Blast-radius and graph analysis are inactive."
+                            )
                         INGEST_ERRORS[ws.id] = ws.error_message
                     else:
                         truncation_warning = res.get("warning") or summary.get("warning")
@@ -249,14 +256,12 @@ def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
                 logger.warning("Graph health check error for %s: %s", ws.id, ge)
                 graph_cnt = None
 
-            if vec_cnt is not None or graph_cnt is not None:
-                v_count = vec_cnt or 0
-                g_count = graph_cnt or 0
+            if vec_cnt is not None and graph_cnt is not None:
                 db_ws = db.query(Workspace).filter(Workspace.id == ws.id).first() if ws not in db else ws
                 if not db_ws:
                     return ws
 
-                if v_count == 0 and g_count == 0:
+                if vec_cnt == 0 and graph_cnt == 0:
                     db_ws.status = "FAILED"
                     db_ws.error_message = "Indexed data was lost after server restart. Please re-index this repository."
                     INGEST_ERRORS[db_ws.id] = db_ws.error_message
@@ -264,7 +269,7 @@ def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
                     db.refresh(db_ws)
                     logger.warning("Workspace %s data lost after restart -> marked FAILED", db_ws.id)
                     return db_ws
-                elif v_count == 0 and g_count > 0 and db_ws.status == "READY":
+                elif vec_cnt == 0 and graph_cnt > 0 and db_ws.status == "READY":
                     db_ws.status = "PARTIAL"
                     db_ws.error_message = "Vector embeddings were lost after server restart. Semantic search is unavailable. Please re-index."
                     INGEST_ERRORS[db_ws.id] = db_ws.error_message
@@ -272,7 +277,7 @@ def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
                     db.refresh(db_ws)
                     logger.warning("Workspace %s vectors lost after restart -> downgraded to PARTIAL", db_ws.id)
                     return db_ws
-                elif g_count == 0 and v_count > 0 and db_ws.status == "READY":
+                elif graph_cnt == 0 and vec_cnt > 0 and db_ws.status == "READY":
                     db_ws.status = "PARTIAL"
                     db_ws.error_message = "Knowledge graph was lost after server restart. Blast radius and architecture views are unavailable. Please re-index."
                     INGEST_ERRORS[db_ws.id] = db_ws.error_message
@@ -560,7 +565,8 @@ async def ingest_workspace(
             raise HTTPException(status_code=400, detail="Internal, metadata, or loopback Git addresses are not permitted.")
 
         allowed_hosts = [h.strip().lower() for h in getattr(settings, "GIT_ALLOWED_HOSTS", "github.com,gitlab.com,bitbucket.org").split(",") if h.strip()]
-        if hostname not in allowed_hosts:
+        clean_hostname = hostname.removeprefix("www.")
+        if clean_hostname not in allowed_hosts and hostname not in allowed_hosts:
             raise HTTPException(
                 status_code=400,
                 detail=f"Git host '{hostname}' is not permitted. Allowed hosts: {', '.join(allowed_hosts)}"
@@ -583,6 +589,7 @@ async def ingest_workspace(
         db.add(ws)
         db.commit()
         db.refresh(ws)
+        _register_active_job(ws.id)
         background_tasks.add_task(_run_background_git_ingestion, ws.id, clean_url, clean_branch)
 
     elif upload_type == "zip":
@@ -625,6 +632,7 @@ async def ingest_workspace(
         db.add(ws)
         db.commit()
         db.refresh(ws)
+        _register_active_job(ws.id)
         background_tasks.add_task(_run_background_zip_ingestion, ws.id, temp_zip)
 
     else:

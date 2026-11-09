@@ -2483,7 +2483,7 @@ export default function App() {
                     <p className="text-xs text-slate-400">Paste this JSON into your local .vscode/mcp.json file</p>
                   </div>
                   <button
-                    onClick={() => handleCopy(`{\n  "servers": {\n    "codegraph-rag": {\n      "type": "stdio",\n      "command": "python",\n      "args": ["/workspaces/CodeGraph-RAG/mcp_server.py"]\n    }\n  }\n}`, 'MCP Config Copied!')}
+                    onClick={() => handleCopy(`{\n  "servers": {\n    "codegraph-rag": {\n      "type": "stdio",\n      "command": "python",\n      "args": ["backend/mcp_server.py"],\n      "env": {\n        "PYTHONPATH": ".",\n        "NEO4J_URI": "bolt://localhost:7687",\n        "NEO4J_USER": "neo4j",\n        "NEO4J_PASSWORD": "password"\n      }\n    }\n  }\n}`, 'MCP Config Copied!')}
                     className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 font-bold text-xs rounded-xl flex items-center space-x-1.5 border border-slate-700"
                   >
                     <Copy className="h-3.5 w-3.5" />
@@ -2498,9 +2498,10 @@ export default function App() {
       "type": "stdio",
       "command": "python",
       "args": [
-        "/workspaces/CodeGraph-RAG/mcp_server.py"
+        "backend/mcp_server.py"
       ],
       "env": {
+        "PYTHONPATH": ".",
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
         "NEO4J_PASSWORD": "password"

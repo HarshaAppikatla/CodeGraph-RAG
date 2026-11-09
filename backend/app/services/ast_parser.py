@@ -130,10 +130,13 @@ class CodeASTParser:
     def __init__(self, filepath: str, code_str: Optional[str] = None):
         self.filepath = filepath
         ext = os.path.splitext(filepath)[1].lower()
-        lang_info = LANGUAGE_MODULE_MAP.get(ext, ("python", tspython))
-        self.language_id = lang_info[0]
-        ts_mod = lang_info[1]
-        self.language_obj = _resolve_language(ts_mod)
+        if ext in LANGUAGE_MODULE_MAP:
+            lang_info = LANGUAGE_MODULE_MAP[ext]
+            self.language_id = lang_info[0]
+            self.language_obj = _resolve_language(lang_info[1])
+        else:
+            self.language_id = "unknown"
+            self.language_obj = None
 
         if code_str is not None:
             self.code_str = code_str

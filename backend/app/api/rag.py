@@ -360,17 +360,6 @@ def _build_vector_architecture_graph(workspace_id: Optional[str]) -> Dict[str, A
                         "relationType": "CONTAINS",
                     })
 
-    # Synthesize calls among methods where name matches or common services
-    method_nodes = [n for n in nodes if n["type"] == "METHOD"]
-    for i in range(len(method_nodes) - 1):
-        if i < 8:
-            edges.append({
-                "from": method_nodes[i]["id"],
-                "to": method_nodes[i + 1]["id"],
-                "label": "[:CALLS]",
-                "relationType": "CALLS",
-            })
-
     return {
         "workspace_id": workspace_id or "default",
         "title": "Interconnected Codebase Architecture Map",

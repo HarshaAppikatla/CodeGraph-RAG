@@ -367,8 +367,9 @@ def login_demo(
 def register_user(req: AuthRequest, request: Request, db: Session = Depends(get_db)):
     """Registers a new developer account and issues a JWT token."""
     _check_auth_ip_rate_limit(request)
+    normalized_email = (req.email or "").strip().lower()
 
-    if req.email.strip().lower().endswith("@codegraph.ai"):
+    if normalized_email.endswith("@codegraph.ai"):
         raise HTTPException(
             status_code=400,
             detail="The @codegraph.ai domain is reserved for internal system accounts.",
@@ -380,12 +381,12 @@ def register_user(req: AuthRequest, request: Request, db: Session = Depends(get_
             detail="Password must be at least 8 characters long.",
         )
 
-    existing = db.query(User).filter(User.email == req.email).first()
+    existing = db.query(User).filter(User.email == normalized_email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Account with this email already exists.")
 
     new_user = User(
-        email=req.email,
+        email=normalized_email,
         password_hash=pwd_context.hash(req.password),
         role=req.role or "Software Engineer",
     )
@@ -410,18 +411,19 @@ def register_user(req: AuthRequest, request: Request, db: Session = Depends(get_
 def login_user(req: AuthRequest, request: Request, db: Session = Depends(get_db)):
     """Authenticates standard credentials and issues a JWT token."""
     client_ip = _get_client_ip(request)
+    normalized_email = (req.email or "").strip().lower()
     _check_auth_ip_rate_limit(request)
-    _check_email_ip_lockout(req.email, client_ip)
+    _check_email_ip_lockout(normalized_email, client_ip)
 
-    user = db.query(User).filter(User.email == req.email).first()
+    user = db.query(User).filter(User.email == normalized_email).first()
     if not user or not pwd_context.verify(req.password, user.password_hash):
-        _record_failed_email_attempt(req.email, client_ip)
+        _record_failed_email_attempt(normalized_email, client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
         )
 
-    _clear_failed_email_attempts(req.email, client_ip)
+    _clear_failed_email_attempts(normalized_email, client_ip)
     token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
     return AuthResponse(
         access_token=token,
