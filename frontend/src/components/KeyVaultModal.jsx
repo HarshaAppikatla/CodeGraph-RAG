@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 
-export const PROVIDER_METADATA = [
+const PROVIDER_METADATA = [
   {
     id: 'gemini',
     name: 'Google Gemini',
@@ -101,6 +101,12 @@ export default function KeyVaultModal({
 }) {
   const targetInitial = (initialTab || defaultProvider || 'gemini').toLowerCase();
   const [selectedProvider, setSelectedProvider] = useState(targetInitial);
+  const [prevTabProp, setPrevTabProp] = useState(initialTab || defaultProvider);
+  if ((initialTab || defaultProvider) !== prevTabProp) {
+    setPrevTabProp(initialTab || defaultProvider);
+    setSelectedProvider((initialTab || defaultProvider || 'gemini').toLowerCase());
+  }
+
   const [keyInputs, setKeyInputs] = useState({});
   const [showKey, setShowKey] = useState({});
   const [statusMessage, setStatusMessage] = useState({ text: '', type: '' });
@@ -109,29 +115,22 @@ export default function KeyVaultModal({
   const [maskedKeys, setMaskedKeys] = useState({});
 
   useEffect(() => {
-    const tabToFocus = initialTab || defaultProvider;
-    if (tabToFocus) {
-      setSelectedProvider(tabToFocus.toLowerCase());
-    }
-  }, [initialTab, defaultProvider, isOpen]);
-
-  // Fetch live key configuration status from backend
-  const fetchStatus = async () => {
-    try {
-      const res = await api.getKeysStatus();
-      if (res) {
-        setBackendStatus(res.status || res);
-        if (res.masked_keys) setMaskedKeys(res.masked_keys);
-      }
-    } catch {
-      // Offline fallback: rely on local state
-    }
-  };
-
-  useEffect(() => {
     if (isOpen) {
-      fetchStatus();
-      setStatusMessage({ text: '', type: '' });
+      let active = true;
+      (async () => {
+        try {
+          const res = await api.getKeysStatus();
+          if (active && res) {
+            setBackendStatus(res.status || res);
+            if (res.masked_keys) setMaskedKeys(res.masked_keys);
+          }
+        } catch {
+          // Offline fallback: rely on local state
+        }
+      })();
+      return () => {
+        active = false;
+      };
     }
   }, [isOpen]);
 

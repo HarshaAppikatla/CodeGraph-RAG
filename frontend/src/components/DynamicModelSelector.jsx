@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   Zap, 
   Cpu, 
@@ -11,104 +11,9 @@ import {
   Lock
 } from 'lucide-react';
 import { getKeyStatus, getDiscoveredModels } from '../services/api';
+import { AVAILABLE_MODELS } from '../constants/models';
 
-export const AVAILABLE_MODELS = [
-  {
-    id: 'gemini-3.8-flash',
-    name: 'Gemini 3.8 Flash',
-    provider: 'gemini',
-    tier: 'Fast Reasoning',
-    description: 'Next-gen multimodal, low latency & thinking capabilities',
-    recommended: true,
-  },
-  {
-    id: 'gemini-2.5-flash',
-    name: 'Gemini 2.5 Flash',
-    provider: 'gemini',
-    tier: 'Production',
-    description: 'Optimal latency-to-quality ratio for codebase analysis',
-  },
-  {
-    id: 'gemini-1.5-pro',
-    name: 'Gemini 1.5 Pro',
-    provider: 'gemini',
-    tier: 'Deep Pro',
-    description: 'Extended context window for comprehensive multi-file ASTs',
-  },
-  {
-    id: 'claude-3-7-sonnet',
-    name: 'Claude 3.7 Sonnet',
-    provider: 'anthropic',
-    tier: 'Hybrid Thinking',
-    description: 'State-of-the-art code refactoring and hybrid reasoning',
-  },
-  {
-    id: 'claude-3-5-sonnet',
-    name: 'Claude 3.5 Sonnet',
-    provider: 'anthropic',
-    tier: 'Coding Expert',
-    description: 'Industry benchmark for precise syntax and diff generation',
-  },
-  {
-    id: 'gpt-4o',
-    name: 'GPT-4o',
-    provider: 'openai',
-    tier: 'Flagship',
-    description: 'High-speed reasoning across complex dependency graphs',
-  },
-  {
-    id: 'o3-mini',
-    name: 'o3-mini',
-    provider: 'openai',
-    tier: 'Reasoning',
-    description: 'STEM & code specialized reasoning engine',
-  },
-  {
-    id: 'deepseek-r1',
-    name: 'DeepSeek R1',
-    provider: 'deepseek',
-    tier: 'Open Reasoning',
-    description: 'Open-weights reasoning model with chain-of-thought insights',
-  },
-  {
-    id: 'groq/openai/gpt-oss-120b',
-    name: 'GPT-OSS 120B (Groq)',
-    provider: 'groq',
-    tier: 'Flagship Open-Weights',
-    description: '120B open weights reasoning running on ultra-fast Groq LPUs',
-    recommended: true,
-  },
-  {
-    id: 'groq/qwen/qwen3.8-27b',
-    name: 'Qwen 3.8 27B',
-    provider: 'groq',
-    tier: 'Code Expert',
-    description: 'High-precision code comprehension and AST reasoning on Groq LPUs',
-  },
-  {
-    id: 'groq/openai/gpt-oss-20b',
-    name: 'GPT-OSS 20B (Groq)',
-    provider: 'groq',
-    tier: 'Ultra Fast',
-    description: 'Ultra-fast low-latency inference on Groq LPUs',
-  },
-  {
-    id: 'groq/llama-3.3-70b-versatile',
-    name: 'Llama 3.3 70B',
-    provider: 'groq',
-    tier: 'Groq LPU Speed',
-    description: 'Sub-second AST analysis powered by Groq LPU inference engine',
-  },
-  {
-    id: 'groq/allam-2-7b',
-    name: 'Allam 2 7B',
-    provider: 'groq',
-    tier: 'Fast Reasoning',
-    description: 'Lightweight multilingual open weights reasoning on Groq LPUs',
-  },
-];
-
-export const THINKING_LEVELS = [
+const THINKING_LEVELS = [
   { id: 'low', label: 'Low', budget: '1,024 tokens', desc: 'Fast, concise answers' },
   { id: 'medium', label: 'Medium', budget: '4,096 tokens', desc: 'Balanced reasoning & AST trace' },
   { id: 'high', label: 'High', budget: '8,192 tokens', desc: 'Exhaustive architectural analysis' },
@@ -177,46 +82,59 @@ export default function DynamicModelSelector({
     ? discoveredModels
     : (availableModels || AVAILABLE_MODELS);
 
-  const refreshKeys = async () => {
-    try {
-      const res = await getKeyStatus();
-      if (res) {
-        setInternalKeyStatus(res);
-        onKeyStatusRefreshed?.(res);
-      }
-    } catch (err) {
-      console.warn("Key status check notice:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchLiveModels = async () => {
-    try {
-      const live = await getDiscoveredModels();
-      if (live && Array.isArray(live) && live.length > 0) {
-        setDiscoveredModels(live);
-      }
-    } catch (err) {
-      console.warn("Live models query notice:", err);
-    }
-  };
-
   useEffect(() => {
-    refreshKeys();
-    fetchLiveModels();
-  }, []);
+    let mounted = true;
+    const init = async () => {
+      try {
+        const res = await getKeyStatus();
+        if (mounted && res) {
+          setInternalKeyStatus(res);
+          onKeyStatusRefreshed?.(res);
+        }
+      } catch (err) {
+        console.warn("Key status check notice:", err);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+      try {
+        const live = await getDiscoveredModels();
+        if (mounted && live && Array.isArray(live) && live.length > 0) {
+          setDiscoveredModels(live);
+        }
+      } catch (err) {
+        console.warn("Live models query notice:", err);
+      }
+    };
+    init();
+    return () => {
+      mounted = false;
+    };
+  }, [onKeyStatusRefreshed]);
 
   // Re-fetch live models whenever keyStatus changes (e.g. key added or deleted)
   useEffect(() => {
-    fetchLiveModels();
+    let mounted = true;
+    const fetchLive = async () => {
+      try {
+        const live = await getDiscoveredModels();
+        if (mounted && live && Array.isArray(live) && live.length > 0) {
+          setDiscoveredModels(live);
+        }
+      } catch (err) {
+        console.warn("Live models query notice:", err);
+      }
+    };
+    fetchLive();
+    return () => {
+      mounted = false;
+    };
   }, [keyStatus]);
 
   // Helper: Determine if model provider is unlocked
-  const isUnlocked = (model) => {
+  const isUnlocked = useCallback((model) => {
     const provider = (model?.provider || 'gemini').toLowerCase();
     return Boolean(keyStatus[provider]);
-  };
+  }, [keyStatus]);
 
   // Auto-fallback execution when key status changes or model is locked
   useEffect(() => {
@@ -226,7 +144,7 @@ export default function DynamicModelSelector({
         onSelectModel?.(fallback);
       }
     }
-  }, [keyStatus, loading, selectedModel, effectiveModels]);
+  }, [keyStatus, loading, selectedModel, effectiveModels, isUnlocked, onSelectModel]);
 
   const triggerOpenVault = (provider) => {
     setIsModelDropdownOpen(false);

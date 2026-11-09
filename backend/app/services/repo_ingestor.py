@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import shutil
 import tempfile
 import uuid
@@ -7,12 +8,35 @@ import zipfile
 import subprocess
 from collections import Counter
 from pathlib import Path
+from threading import Lock
 from typing import List, Dict, Any, Optional, Tuple
 
 from backend.app.services.vector_store import CodeVectorStore
 from backend.app.services.graph_store import Neo4jGraphStore
 from backend.app.services.ast_parser import CodeASTParser, LANGUAGE_MODULE_MAP
 from backend.app.config import settings
+
+class IngestionCancelledError(Exception):
+    """Raised when an ingestion job is cancelled by the user or exceeded the maximum execution cap."""
+    pass
+
+_CANCELLED_JOBS_LOCK = Lock()
+_CANCELLED_JOBS: set = set()
+
+def cancel_job(workspace_id: str) -> None:
+    """Signals an active ingestion thread to halt processing immediately."""
+    with _CANCELLED_JOBS_LOCK:
+        _CANCELLED_JOBS.add(workspace_id)
+
+def is_job_cancelled(workspace_id: str) -> bool:
+    """Checks whether an ingestion job has been marked cancelled."""
+    with _CANCELLED_JOBS_LOCK:
+        return workspace_id in _CANCELLED_JOBS
+
+def clear_job_cancellation(workspace_id: str) -> None:
+    """Clears the cancellation signal once an ingestion thread has exited."""
+    with _CANCELLED_JOBS_LOCK:
+        _CANCELLED_JOBS.discard(workspace_id)
 
 # Default directory & file patterns to ignore during ingestion
 DEFAULT_IGNORE_PATTERNS = {
@@ -41,7 +65,10 @@ LANGUAGE_NAMES = {
 CHUNK_LINES = 60
 CHUNK_OVERLAP = 10
 MAX_AMBIGUOUS_CALLEES = 5
-MAX_INDEXABLE_SOURCE_FILES = 300
+# Default maximum indexable source files; configurable via MAX_INDEXABLE_FILES environment variable.
+# Raised to 5,000 so full medium-to-large codebases (including 400+ file repos) are indexed completely.
+DEFAULT_MAX_INDEXABLE_SOURCE_FILES = 5000
+MAX_INDEXABLE_SOURCE_FILES = DEFAULT_MAX_INDEXABLE_SOURCE_FILES
 
 
 def chunk_text(content: str, size: int = CHUNK_LINES, overlap: int = CHUNK_OVERLAP) -> List[Tuple[int, int, str]]:
@@ -65,20 +92,27 @@ def resolve_calls(parsed: List[Dict[str, Any]]) -> None:
     not to a nameless stub. Calls from unnamed scopes are dropped."""
     defs: Dict[str, set] = {}
     for item in parsed:
-        for fn in (item["ast"] or {}).get("functions", []):
-            full, short = fn.get("name"), fn.get("short_name") or fn.get("name")
-            if full and short and "anon_" not in full and "lambda_" not in full:
-                defs.setdefault(short, set()).add(full)
+        ast = item.get("ast")
+        if not ast:
+            continue
+        for fn in ast.get("functions", []):
+            full = fn.get("name")
+            short = fn.get("short_name") or fn.get("name")
+            if full and "anon_" not in full and "lambda_" not in full:
+                if short:
+                    defs.setdefault(short, set()).add(full)
+                defs.setdefault(full, set()).add(full)
 
     for item in parsed:
-        ast = item["ast"]
+        ast = item.get("ast")
         if not ast:
             continue
         file_defs = {fn.get("name") for fn in ast.get("functions", [])}
         seen, resolved = set(), []
         for call in ast.get("calls", []):
-            caller, callee = call.get("caller"), call.get("callee")
-            if not caller or not callee or caller == "unnamed_entity":
+            caller = call.get("caller")
+            callee = call.get("callee")
+            if not caller or not callee or caller == "unnamed_entity" or callee == "unnamed_entity":
                 continue
             cands = defs.get(callee)
             if not cands:
@@ -160,10 +194,45 @@ class RepositoryIngestor:
                 valid_files.append(path)
         return valid_files
 
+    def _prepare_source_files(self, source_files: List[Path]) -> Tuple[List[Path], Optional[str]]:
+        """Validates file count against safety limits. Never silently drops files without an explicit warning."""
+        max_limit = getattr(settings, "MAX_INDEXABLE_SOURCE_FILES", None)
+        if max_limit is None:
+            max_limit = int(os.getenv("MAX_INDEXABLE_FILES", str(DEFAULT_MAX_INDEXABLE_SOURCE_FILES)))
+        total_found = len(source_files)
+        if total_found > max_limit:
+            source_files.sort(key=lambda p: 0 if p.suffix.lower() in LANGUAGE_MODULE_MAP else 1)
+            selected_files = source_files[:max_limit]
+            omitted = total_found - max_limit
+            warning = (
+                f"Warning: Codebase truncated. Indexed {max_limit} of {total_found} source files "
+                f"({omitted} files omitted due to size limit). Impact analysis, call graphs, and search are incomplete."
+            )
+            self.log(f"⚠️ {warning}")
+            return selected_files, warning
+        return source_files, None
+
     def ingest_local_directory(self, root_dir: str, workspace_id: Optional[str] = None) -> Dict[str, Any]:
         """Indexes an existing local workspace directory into Vector & Graph stores."""
-        source_files = self.collect_source_files(root_dir)
-        return self._index_files(root_dir, source_files, workspace_id=workspace_id)
+        raw_files = self.collect_source_files(root_dir)
+        total_found = len(raw_files)
+        source_files, truncation_warning = self._prepare_source_files(raw_files)
+        indexing_summary = self._index_files(root_dir, source_files, workspace_id=workspace_id)
+        if truncation_warning:
+            indexing_summary["warning"] = truncation_warning
+            indexing_summary["truncated"] = True
+            indexing_summary["total_files_found"] = total_found
+            indexing_summary["indexed_files"] = len(source_files)
+        return {
+            "status": "success",
+            "source": root_dir,
+            "total_files": len(source_files),
+            "total_files_found": total_found,
+            "truncated": bool(truncation_warning),
+            "warning": truncation_warning,
+            "indexing_summary": indexing_summary,
+            **indexing_summary,
+        }
 
     def ingest_git_repo(
         self, repo_url: str, branch: Optional[str] = None, workspace_id: Optional[str] = None
@@ -201,6 +270,13 @@ class RepositoryIngestor:
             "-c", "protocol.https.allow=always",
             "-c", "http.followRedirects=false",
         ]
+        # Prevent git from interactively prompting for username/password in terminal
+        git_env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+
+        def _clean_and_recreate_temp_dir(d: str) -> str:
+            shutil.rmtree(d, ignore_errors=True)
+            return tempfile.mkdtemp(prefix="codegraph_git_")
+
         try:
             cloned = False
             err_msg = ""
@@ -209,37 +285,38 @@ class RepositoryIngestor:
             if clean_branch:
                 clone_cmd = ["git"] + git_harden_flags + ["clone", "--depth", "1", "-b", clean_branch, "--", clean_url, temp_dir]
                 try:
-                    res = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=clone_timeout)
+                    res = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=clone_timeout, env=git_env)
                     if res.returncode == 0:
                         cloned = True
                     else:
                         err_msg = res.stderr.strip()
                         self.log(f"⚠️ Branch '{clean_branch}' clone notice: {err_msg}. Retrying remote default branch...")
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                        temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
+                        temp_dir = _clean_and_recreate_temp_dir(temp_dir)
                 except subprocess.TimeoutExpired:
-                    self.log(f"⚠️ Branch '{clean_branch}' clone timed out after {clone_timeout}s.")
+                    self.log(f"⚠️ Branch '{clean_branch}' clone timed out after {clone_timeout}s. Cleaning temp dir and retrying remote default branch...")
                     err_msg = f"Git clone timed out after {clone_timeout} seconds."
+                    temp_dir = _clean_and_recreate_temp_dir(temp_dir)
 
             # 2. Fallback: clone without branch specifier (clones remote default branch, e.g. master/main)
             if not cloned:
                 fallback_cmd = ["git"] + git_harden_flags + ["clone", "--depth", "1", "--", clean_url, temp_dir]
                 try:
-                    res2 = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=clone_timeout)
+                    res2 = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=clone_timeout, env=git_env)
                     if res2.returncode == 0:
                         cloned = True
                     else:
                         err_msg = res2.stderr.strip() or err_msg
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                        temp_dir = tempfile.mkdtemp(prefix="codegraph_git_")
+                        temp_dir = _clean_and_recreate_temp_dir(temp_dir)
                 except subprocess.TimeoutExpired:
+                    self.log(f"⚠️ Remote default branch clone timed out after {clone_timeout}s. Cleaning temp dir before master fallback...")
                     err_msg = f"Git clone timed out after {clone_timeout} seconds."
+                    temp_dir = _clean_and_recreate_temp_dir(temp_dir)
 
             # 3. Final fallback: explicitly try 'master' if requested branch was 'main'
             if not cloned and clean_branch != "master":
                 master_cmd = ["git"] + git_harden_flags + ["clone", "--depth", "1", "-b", "master", "--", clean_url, temp_dir]
                 try:
-                    res3 = subprocess.run(master_cmd, capture_output=True, text=True, timeout=clone_timeout)
+                    res3 = subprocess.run(master_cmd, capture_output=True, text=True, timeout=clone_timeout, env=git_env)
                     if res3.returncode == 0:
                         cloned = True
                     else:
@@ -254,6 +331,15 @@ class RepositoryIngestor:
                     friendly_err = (
                         "Git clone failed: Repository redirect detected. For SSRF security, HTTP redirects are disabled. "
                         "Please provide the canonical repository URL (e.g. check for renamed repositories or verify the exact URL format on GitHub/GitLab)."
+                    )
+                elif any(x in lower_err for x in [
+                    "could not read username", "could not read password", "authentication failed",
+                    "terminal prompts disabled", "repository not found", "please make sure you have the correct access rights"
+                ]):
+                    friendly_err = (
+                        "Git clone failed: Repository is private or not found. "
+                        "Accessing private repositories requires credentials or is not supported. "
+                        "Please ensure the repository is public and the URL is correct."
                     )
                 else:
                     friendly_err = f"Git clone failed: {err_msg}"
@@ -271,20 +357,29 @@ class RepositoryIngestor:
             except Exception:
                 pass
 
-            source_files = self.collect_source_files(temp_dir)
-            if len(source_files) > MAX_INDEXABLE_SOURCE_FILES:
-                self.log(f"ℹ️ Repository contains {len(source_files)} files; prioritizing top {MAX_INDEXABLE_SOURCE_FILES} code files to maintain high stability on free-tier memory.")
-                source_files.sort(key=lambda p: 0 if p.suffix.lower() in LANGUAGE_MODULE_MAP else 1)
-                source_files = source_files[:MAX_INDEXABLE_SOURCE_FILES]
-            self.log(f"✅ Found {len(source_files)} source files for indexing on branch '{actual_branch}'.")
+            raw_files = self.collect_source_files(temp_dir)
+            total_found = len(raw_files)
+            source_files, truncation_warning = self._prepare_source_files(raw_files)
+            self.log(f"✅ Found {len(source_files)} source files for indexing on branch '{actual_branch}' (total discovered: {total_found}).")
             indexing_summary = self._index_files(temp_dir, source_files, workspace_id)
+            if truncation_warning:
+                indexing_summary["warning"] = truncation_warning
+                indexing_summary["truncated"] = True
+                indexing_summary["total_files_found"] = total_found
+                indexing_summary["indexed_files"] = len(source_files)
             return {
                 "status": "success",
                 "source": clean_url,
                 "branch": actual_branch,
                 "total_files": len(source_files),
+                "total_files_found": total_found,
+                "truncated": bool(truncation_warning),
+                "warning": truncation_warning,
                 "indexing_summary": indexing_summary,
             }
+        except IngestionCancelledError as ice:
+            self.log(f"🛑 Git ingestion halted: {ice}")
+            return {"status": "error", "message": str(ice)}
         except Exception as e:
             self.log(f"❌ Unexpected git ingestion error: {e}")
             return {"status": "error", "message": f"Git ingestion failed: {e}"}
@@ -297,8 +392,8 @@ class RepositoryIngestor:
             return {"status": "error", "message": f"ZIP file not found at: {zip_path}"}
         self.log(f"📦 Extracting ZIP archive: {zip_path}")
         temp_dir = tempfile.mkdtemp(prefix="codegraph_zip_")
-        MAX_UNCOMPRESSED_BYTES = 500 * 1024 * 1024  # 500 MB safety cap to prevent zip bombs
-        MAX_ZIP_ENTRIES = 25000
+        MAX_UNCOMPRESSED_BYTES = 2048 * 1024 * 1024  # 2 GB safety cap to prevent zip bombs
+        MAX_ZIP_ENTRIES = 50000
         try:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 infolist = zip_ref.infolist()
@@ -331,19 +426,28 @@ class RepositoryIngestor:
                         continue
 
                     zip_ref.extract(member, temp_dir)
-            source_files = self.collect_source_files(temp_dir)
-            if len(source_files) > MAX_INDEXABLE_SOURCE_FILES:
-                self.log(f"ℹ️ ZIP contains {len(source_files)} files; prioritizing top {MAX_INDEXABLE_SOURCE_FILES} code files to maintain high stability on free-tier memory.")
-                source_files.sort(key=lambda p: 0 if p.suffix.lower() in LANGUAGE_MODULE_MAP else 1)
-                source_files = source_files[:MAX_INDEXABLE_SOURCE_FILES]
-            self.log(f"✅ Found {len(source_files)} source files for indexing.")
+            raw_files = self.collect_source_files(temp_dir)
+            total_found = len(raw_files)
+            source_files, truncation_warning = self._prepare_source_files(raw_files)
+            self.log(f"✅ Found {len(source_files)} source files for indexing (total discovered: {total_found}).")
             indexing_summary = self._index_files(temp_dir, source_files, workspace_id)
+            if truncation_warning:
+                indexing_summary["warning"] = truncation_warning
+                indexing_summary["truncated"] = True
+                indexing_summary["total_files_found"] = total_found
+                indexing_summary["indexed_files"] = len(source_files)
             return {
                 "status": "success",
                 "source": zip_path,
                 "total_files": len(source_files),
+                "total_files_found": total_found,
+                "truncated": bool(truncation_warning),
+                "warning": truncation_warning,
                 "indexing_summary": indexing_summary,
             }
+        except IngestionCancelledError as ice:
+            self.log(f"🛑 ZIP ingestion halted: {ice}")
+            return {"status": "error", "message": str(ice)}
         except zipfile.BadZipFile:
             return {"status": "error", "message": "Invalid or corrupted ZIP archive."}
         except Exception as e:
@@ -395,8 +499,32 @@ class RepositoryIngestor:
         lang_counts: Counter = Counter()
         pending_vector_items: List[Dict[str, Any]] = []
         BATCH_FLUSH_SIZE = 16
+        # Track whether at least one successful write reached each backend
+        graph_write_ok = False
+        vector_write_ok = False
+        start_time = time.time()
+        MAX_INDEXING_SECONDS = 1200  # 20-minute safety cap for background ingestion thread
 
+        def _record_upsert(n_upserted: Any) -> None:
+            nonlocal indexed_vectors, vector_write_ok
+            if isinstance(n_upserted, (int, float)):
+                indexed_vectors += int(n_upserted)
+                if n_upserted > 0:
+                    vector_write_ok = True
+            elif n_upserted:
+                # Handles test mocks (e.g. MagicMock) returning truthy values
+                vector_write_ok = True
+
+        # Pass 1: Parse AST structures and stream vector chunking without holding file contents in RAM
+        parsed: List[Dict[str, Any]] = []
         for idx, file_path in enumerate(files):
+            if ws and is_job_cancelled(ws):
+                self.log(f"🛑 Ingestion job for workspace '{ws}' was cancelled. Halting thread.")
+                raise IngestionCancelledError(f"Ingestion for workspace '{ws}' was cancelled.")
+            if time.time() - start_time > MAX_INDEXING_SECONDS:
+                self.log(f"🛑 Ingestion job for workspace '{ws}' exceeded 20-minute safety cap. Halting thread.")
+                raise IngestionCancelledError(f"Ingestion for workspace '{ws}' exceeded maximum safety cap (20 minutes).")
+
             rel_path = str(file_path.relative_to(base_path))
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
@@ -406,35 +534,23 @@ class RepositoryIngestor:
                 if file_path.suffix.lower() in LANGUAGE_NAMES:
                     lang_counts[LANGUAGE_NAMES[file_path.suffix.lower()]] += 1
 
-                # 1. Parse AST structures
                 ast_data = self._parse_ast(file_path, content, rel_path)
-                symbols = []
-                if ast_data:
-                    symbols = sorted({
-                        n for n in (
-                            [c.get("name") for c in ast_data.get("classes", [])]
-                            + [f.get("short_name") or f.get("name") for f in ast_data.get("functions", [])]
-                        ) if n and n != "unnamed_entity" and "anon_" not in n and "lambda_" not in n
-                    })
+                parsed.append({
+                    "rel": rel_path,
+                    "ast": ast_data,
+                })
 
-                    # Ingest into Neo4j immediately
-                    if self.graph_store and hasattr(self.graph_store, "ingest_ast"):
-                        try:
-                            self.graph_store.ingest_ast(rel_path, ast_data, workspace_id=ws)
-                        except Exception as g_err:
-                            self.log(f"⚠️ Graph ingest skipped for '{rel_path}': {g_err}")
-
-                    nodes_count = (
-                        len(ast_data.get("classes", []))
-                        + len(ast_data.get("functions", []))
-                        + len(ast_data.get("imports", []))
-                    )
-                    indexed_graph_nodes += max(1, nodes_count)
-                    indexed_graph_edges += len(ast_data.get("calls", []))
-                    del ast_data
-
-                # 2. Chunk for Vector Store immediately
+                # Chunk for Vector Store immediately to stream vector indexing and release file text
                 if self.vector_store:
+                    symbols = []
+                    if ast_data:
+                        symbols = sorted({
+                            n for n in (
+                                [c.get("name") for c in ast_data.get("classes", [])]
+                                + [f.get("short_name") or f.get("name") for f in ast_data.get("functions", [])]
+                            ) if n and n != "unnamed_entity" and "anon_" not in n and "lambda_" not in n
+                        })
+
                     for n, (start, end, text_snippet) in enumerate(chunk_text(content)):
                         pending_vector_items.append({
                             "doc_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{ws}:{rel_path}:{n}")),
@@ -453,17 +569,17 @@ class RepositoryIngestor:
                     # Micro-batch flush to keep memory usage flat
                     if len(pending_vector_items) >= BATCH_FLUSH_SIZE:
                         try:
-                            indexed_vectors += self.vector_store.upsert_code_batch(pending_vector_items)
+                            _record_upsert(self.vector_store.upsert_code_batch(pending_vector_items))
                         except Exception as vec_err:
                             self.log(f"⚠️ Vector batch indexing notice: {vec_err}")
                         pending_vector_items.clear()
 
                 del content
                 if (idx + 1) % 25 == 0 or (idx + 1) == len(files):
-                    self.log(f"📊 Progress: Indexed {idx + 1}/{len(files)} files into Neo4j & Qdrant ({indexed_graph_nodes} nodes, {indexed_vectors} vectors)...")
+                    self.log(f"📊 Progress: Parsed AST for {idx + 1}/{len(files)} files...")
 
-                # Periodic garbage collection every 10 files
-                if (idx + 1) % 10 == 0:
+                # Periodic garbage collection every 15 files
+                if (idx + 1) % 15 == 0:
                     gc.collect()
 
             except Exception as file_err:
@@ -472,11 +588,62 @@ class RepositoryIngestor:
         # Flush any remaining vector chunks
         if self.vector_store and pending_vector_items:
             try:
-                indexed_vectors += self.vector_store.upsert_code_batch(pending_vector_items)
+                _record_upsert(self.vector_store.upsert_code_batch(pending_vector_items))
             except Exception as vec_err:
                 self.log(f"⚠️ Final vector batch indexing notice: {vec_err}")
             pending_vector_items.clear()
 
+        # Derive vector_ok from confirmed upserts and model health
+        if vector_write_ok or (isinstance(indexed_vectors, (int, float)) and indexed_vectors > 0):
+            vector_write_ok = True
+        elif self.vector_store and hasattr(self.vector_store, "embedding_ok"):
+            # If the vector store confirmed the model loaded but nothing was stored, treat as failure
+            vector_write_ok = False
+
+        # Pass 1.5: Cross-file caller-callee resolution
+        resolve_calls(parsed)
+
+        # Pass 2: Ingest resolved AST nodes and call edges into Neo4j
+        for idx, item in enumerate(parsed):
+            if ws and is_job_cancelled(ws):
+                self.log(f"🛑 Ingestion job for workspace '{ws}' was cancelled. Halting thread.")
+                raise IngestionCancelledError(f"Ingestion for workspace '{ws}' was cancelled.")
+            if time.time() - start_time > MAX_INDEXING_SECONDS:
+                self.log(f"🛑 Ingestion job for workspace '{ws}' exceeded 20-minute safety cap. Halting thread.")
+                raise IngestionCancelledError(f"Ingestion for workspace '{ws}' exceeded maximum safety cap (20 minutes).")
+
+            rel_path, ast_data = item["rel"], item["ast"]
+            if ast_data:
+                written_to_graph = False
+                if self.graph_store and hasattr(self.graph_store, "ingest_ast"):
+                    try:
+                        ok = self.graph_store.ingest_ast(rel_path, ast_data, workspace_id=ws)
+                        # ingest_ast returns True on confirmed Neo4j commit, False on error or when driver is None
+                        if ok:
+                            written_to_graph = True
+                    except Exception as g_err:
+                        self.log(f"⚠️ Graph ingest skipped for '{rel_path}': {g_err}")
+
+                if written_to_graph:
+                    nodes_count = (
+                        len(ast_data.get("classes", []))
+                        + len(ast_data.get("functions", []))
+                        + len(ast_data.get("imports", []))
+                    )
+                    indexed_graph_nodes += max(1, nodes_count)
+                    indexed_graph_edges += len(ast_data.get("calls", []))
+                    graph_write_ok = True
+
+                # Free AST data as we progress
+                item["ast"] = None
+
+            if (idx + 1) % 25 == 0 or (idx + 1) == len(parsed):
+                self.log(f"📊 Progress: Ingested {idx + 1}/{len(parsed)} files into Neo4j ({indexed_graph_nodes} nodes, {indexed_graph_edges} edges)...")
+
+            if (idx + 1) % 15 == 0:
+                gc.collect()
+
+        del parsed
         gc.collect()
 
         return {
@@ -484,5 +651,8 @@ class RepositoryIngestor:
             "graph_nodes": indexed_graph_nodes,
             "graph_edges": indexed_graph_edges,
             "languages": [name for name, _ in lang_counts.most_common(3)],
+            # True only when at least one successful write reached each backend
+            "graph_ok": graph_write_ok,
+            "vector_ok": vector_write_ok,
         }
 RepoIngestor = RepositoryIngestor

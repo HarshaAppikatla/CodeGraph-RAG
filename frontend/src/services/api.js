@@ -166,16 +166,21 @@ export const api = {
   },
 
   // RAG & Graph Operations
-  getSymbolImpact: (workspaceId, symbolKey) =>
-    request('/api/rag/impact', { method: 'POST', json: { workspace_id: workspaceId, symbol: symbolKey } }),
+  getSymbolImpact: (workspaceId, symbolKey) => {
+    if (!workspaceId || !String(workspaceId).trim()) return Promise.reject(new Error("Workspace ID is required."));
+    return request('/api/rag/impact', { method: 'POST', json: { workspace_id: String(workspaceId).trim(), symbol: symbolKey } });
+  },
 
-  getWorkspaceArchitectureGraph: (workspaceId) =>
-    request('/api/rag/architecture-graph', { method: 'POST', json: { workspace_id: workspaceId } }),
+  getWorkspaceArchitectureGraph: (workspaceId) => {
+    if (!workspaceId || !String(workspaceId).trim()) return Promise.reject(new Error("Workspace ID is required."));
+    return request('/api/rag/architecture-graph', { method: 'POST', json: { workspace_id: String(workspaceId).trim() } });
+  },
 
   queryRag: (workspaceId, queryText, key, history, modelMetadata = {}) => {
+    if (!workspaceId || !String(workspaceId).trim()) return Promise.reject(new Error("Workspace ID is required."));
     const prov = (modelMetadata?.provider || 'gemini').toLowerCase();
     const payload = {
-      workspace_id: workspaceId,
+      workspace_id: String(workspaceId).trim(),
       query: queryText,
       history: history || [],
       model_id: modelMetadata?.model_id,
@@ -188,19 +193,28 @@ export const api = {
     });
   },
 
-  searchRag: (payload) =>
-    request('/api/rag/search', {
+  searchRag: (payload) => {
+    if (!payload?.workspace_id || !String(payload.workspace_id).trim()) return Promise.reject(new Error("Workspace ID is required."));
+    return request('/api/rag/search', {
       method: 'POST',
-      json: payload,
-    }),
+      json: { ...payload, workspace_id: String(payload.workspace_id).trim() },
+    });
+  },
 
-  generateRefactor: (workspaceId, promptText, geminiKey, previousDiffs) =>
-    request('/api/rag/refactor', {
+  generateRefactor: (workspaceId, promptText, key, previousDiffs, options = {}) => {
+    if (!workspaceId || !String(workspaceId).trim()) return Promise.reject(new Error("Workspace ID is required."));
+    const prov = (options?.provider || 'gemini').toLowerCase();
+    const payload = {
+      workspace_id: String(workspaceId).trim(),
+      prompt: promptText,
+      provider: prov,
+      model_id: options?.model_id,
+      model: options?.model,
+      previous_diffs: previousDiffs || []
+    };
+    return request('/api/rag/refactor', {
       method: 'POST',
-      json: withKey({
-        workspace_id: workspaceId,
-        prompt: promptText,
-        previous_diffs: previousDiffs || []
-      }, geminiKey),
-    }),
+      json: withKey(payload, key, prov),
+    });
+  },
 };

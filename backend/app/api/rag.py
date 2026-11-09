@@ -3,9 +3,11 @@ import logging
 import os
 import re
 import time
+from collections import defaultdict
+from threading import Lock
 from typing import List, Dict, Any, Optional, Tuple
-from fastapi import APIRouter, HTTPException, Depends, status
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends, status, Request
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.app.config import settings
@@ -19,6 +21,42 @@ from backend.app.services.ast_metrics import calculate_health_delta
 
 router = APIRouter(prefix="/rag", tags=["Retrieval-Augmented Generation & Graph Impact"])
 logger = logging.getLogger("codegraph.rag")
+
+
+class RAGRateLimiter:
+    """Sliding-window rate limiter per user/IP for expensive /rag endpoints."""
+    def __init__(self, requests_per_minute: int = 45):
+        self.rpm = requests_per_minute
+        self.records: Dict[str, List[float]] = defaultdict(list)
+        self.lock = Lock()
+
+    def check(self, key: str) -> bool:
+        now = time.time()
+        window = 60.0
+        with self.lock:
+            timestamps = [t for t in self.records[key] if now - t < window]
+            if len(timestamps) >= self.rpm:
+                self.records[key] = timestamps
+                return False
+            timestamps.append(now)
+            self.records[key] = timestamps
+            return True
+
+
+rag_rate_limiter = RAGRateLimiter(requests_per_minute=45)
+
+
+def require_rag_rate_limit(
+    request: Request,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    client_id = f"user:{current_user.id}" if current_user else f"ip:{client_ip}"
+    if not rag_rate_limiter.check(client_id):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded for RAG operations. Please wait a moment before sending more queries.",
+        )
 
 
 class ImpactRequest(BaseModel):
@@ -36,7 +74,7 @@ class QueryRequest(BaseModel):
     provider: Optional[str] = None
     thinking_level: Optional[str] = "medium"
     api_key: Optional[str] = None
-    top_k: Optional[int] = 5
+    top_k: Optional[int] = Field(default=5, ge=1, le=25)
     temperature: Optional[float] = 0.0
     stream: Optional[bool] = False
 
@@ -50,6 +88,9 @@ class RefactorRequest(BaseModel):
     gemini_api_key: Optional[str] = None
     api_key: Optional[str] = None
     provider: Optional[str] = "gemini"
+    model: Optional[str] = None
+    model_id: Optional[str] = None
+    thinking_level: Optional[str] = "medium"
     previous_diffs: Optional[List[Dict[str, Any]]] = None
 
 
@@ -69,10 +110,16 @@ def _verify_workspace_access(
     db: Session
 ) -> None:
     """Strictly validates tenant isolation for workspace operations."""
-    if not workspace_id:
-        return
+    if not workspace_id or not str(workspace_id).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Workspace ID is required."
+        )
+
+    clean_ws = str(workspace_id).strip()
+
     # Public demo workspaces are accessible to everyone
-    if workspace_id in DEMO_WORKSPACE_IDS or workspace_id.startswith("ws-"):
+    if clean_ws in DEMO_WORKSPACE_IDS:
         return
 
     # User-created custom workspaces require authentication and ownership
@@ -83,7 +130,7 @@ def _verify_workspace_access(
         )
 
     from backend.app.models.workspace import Workspace
-    ws = db.query(Workspace).filter(Workspace.id == workspace_id, Workspace.user_id == current_user.id).first()
+    ws = db.query(Workspace).filter(Workspace.id == clean_ws, Workspace.user_id == current_user.id).first()
     if not ws:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -100,10 +147,11 @@ def analyze_impact(
 ):
     """Executes multi-hop Cypher queries and calculates blast-radius impact metadata."""
     _verify_workspace_access(req.workspace_id, current_user, db)
+    ws_id = req.workspace_id.strip()
     symbol = req.symbol.strip()
 
     # Canned graphs only describe the bundled demo workspaces
-    is_demo = req.workspace_id in DEMO_WORKSPACE_IDS
+    is_demo = ws_id in DEMO_WORKSPACE_IDS
     if is_demo and symbol in CANONICAL_SYMBOLS:
         return CANONICAL_SYMBOLS[symbol]
 
@@ -111,15 +159,15 @@ def analyze_impact(
     # 1. Try Neo4j live graph with cross-file inheritance & multi-hop caller traversal
     try:
         graph_store = get_graph_store()
-        impact = graph_store.analyze_blast_radius_with_inheritance(symbol, workspace_id=req.workspace_id)
+        impact = graph_store.analyze_blast_radius_with_inheritance(symbol, workspace_id=ws_id)
         if not impact.get("impact_found"):
-            impact = graph_store.analyze_impact(symbol, workspace_id=req.workspace_id)
+            impact = graph_store.analyze_impact(symbol, workspace_id=ws_id)
 
         if impact.get("impact_found"):
             snippet = ""
             try:
                 vector_store = get_vector_store()
-                chunks = vector_store.search(symbol, top_k=2, workspace_id=req.workspace_id)
+                chunks = vector_store.search(symbol, top_k=2, workspace_id=ws_id)
                 if chunks:
                     matched_file = impact.get("file") or impact.get("defined_in_file")
                     for c in chunks:
@@ -151,7 +199,7 @@ def analyze_impact(
     # 2. Fallback: Lookup symbol in vector store chunks so user sees their actual file and code
     try:
         vector_store = get_vector_store()
-        symbols = vector_store.list_symbols(req.workspace_id)
+        symbols = vector_store.list_symbols(ws_id)
         sym_lower = symbol.lower()
         match = next(
             (s for s in symbols if s["name"].lower() == sym_lower or s["name"].lower().endswith("." + sym_lower) or sym_lower.endswith("." + s["name"].lower())),
@@ -159,7 +207,7 @@ def analyze_impact(
         )
         if match:
             matched_file = match.get("file", "Unknown")
-            chunks = vector_store.search(symbol, top_k=3, workspace_id=req.workspace_id)
+            chunks = vector_store.search(symbol, top_k=3, workspace_id=ws_id)
             snippet = ""
             for c in chunks:
                 if c.get("filepath") == matched_file:
@@ -198,7 +246,13 @@ def analyze_impact(
     raise HTTPException(status_code=404, detail=f"Symbol '{symbol}' was not found.")
 
 
-from backend.app.fixtures.demo_data import CANONICAL_ARCHITECTURE_GRAPHS, CANONICAL_SYMBOLS, _demo_answer, _demo_refactor
+from backend.app.fixtures.demo_data import (
+    CANONICAL_ARCHITECTURE_GRAPHS,
+    CANONICAL_SYMBOLS,
+    _demo_answer,
+    _demo_refactor,
+    _extract_snippets_from_diff,
+)
 
 
 def _build_vector_architecture_graph(workspace_id: Optional[str]) -> Dict[str, Any]:
@@ -335,8 +389,8 @@ def get_architecture_graph(
     interfaces, methods, and files through [:EXTENDS], [:IMPLEMENTS], [:HAS_METHOD],
     [:CALLS], and [:CONTAINS_CLASS] relationships.
     """
-    ws_id = (req.workspace_id or "ws-study-sync").strip()
-    _verify_workspace_access(ws_id, current_user, db)
+    _verify_workspace_access(req.workspace_id, current_user, db)
+    ws_id = req.workspace_id.strip()
 
     # 1. Check for canned high-fidelity demo graphs
     if ws_id in CANONICAL_ARCHITECTURE_GRAPHS:
@@ -478,31 +532,7 @@ def _resolve_key(
             else:
                 return val
 
-    # 3. Environment Variable Fallback per provider
-    env_map = {
-        "gemini": "GEMINI_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "groq": "GROQ_API_KEY"
-    }
-    env_var = env_map.get(prov, "")
-    if env_var:
-        val = os.getenv(env_var, "").strip()
-        if val:
-            if prov == "openai" and not val.startswith("sk-"):
-                logger.warning("Ignoring invalid OPENAI_API_KEY from environment (must start with 'sk-')")
-            elif prov == "anthropic" and not val.startswith("sk-ant-"):
-                logger.warning("Ignoring invalid ANTHROPIC_API_KEY from environment (must start with 'sk-ant-')")
-            elif prov == "groq" and not val.startswith("gsk_"):
-                logger.warning("Ignoring invalid GROQ_API_KEY from environment (must start with 'gsk_')")
-            else:
-                return val
-
-    # Server settings fallback for Gemini
-    if prov == "gemini" and settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip():
-        return settings.GEMINI_API_KEY.strip()
-
+    # Server environment keys are NEVER given to guests/visitors to prevent quota exhaustion
     return ""
 
 
@@ -517,45 +547,21 @@ def _require_key(req_key: Optional[str] = None, current_user: Optional[User] = N
 
 
 def _retrieve(workspace_id: Optional[str], text: str, top_k: int) -> List[Dict[str, Any]]:
-    chunks = []
-    # 1. Primary vector search with workspace filtering
+    """Retrieves relevant code chunks for a workspace strictly from real indexed vectors.
+
+    Never invents placeholder symbol chunks or synthetic 'knowledge graph is ready' chunks.
+    If no relevant code is indexed or found, returns an empty list.
+    """
+    if not workspace_id or not str(workspace_id).strip():
+        return []
+    clean_ws = str(workspace_id).strip()
     try:
         vs = get_vector_store()
-        chunks = vs.search(text, top_k=top_k, workspace_id=workspace_id)
+        if vs:
+            return vs.search(text, top_k=top_k, workspace_id=clean_ws)
     except Exception as e:
         logger.warning(f"Vector store search notice: {e}")
-
-    # 3. Fallback to Neo4j AST knowledge graph symbols if vector search returned nothing
-    if not chunks:
-        try:
-            gs = get_graph_store()
-            neo_symbols = gs.list_symbols(workspace_id=workspace_id, limit=top_k * 2)
-            if neo_symbols:
-                chunks = [
-                    {
-                        "filepath": s.get("file", "unknown"),
-                        "start_line": 1,
-                        "end_line": 50,
-                        "snippet": f"// Indexed AST Symbol in {s.get('file', 'workspace')}:\n// {s.get('type', 'Symbol')} {s.get('name')}",
-                        "score": 0.85,
-                    }
-                    for s in neo_symbols[:top_k]
-                ]
-        except Exception as ge:
-            logger.warning(f"Neo4j fallback retrieval notice: {ge}")
-
-    # 4. Graceful contextual fallback so the model can always answer without a 409 crash
-    if not chunks:
-        chunks = [
-            {
-                "filepath": "workspace_context",
-                "start_line": 1,
-                "end_line": 1,
-                "snippet": f"Query: {text}\nWorkspace ID: {workspace_id or 'default'}\nNote: Structural knowledge graph is ready.",
-                "score": 0.5,
-            }
-        ]
-    return chunks
+    return []
 
 
 def _format_context(chunks: List[Dict[str, Any]]) -> str:
@@ -743,7 +749,7 @@ def _is_noise_file(filepath: str) -> bool:
     return False
 
 
-@router.post("/query")
+@router.post("/query", dependencies=[Depends(require_rag_rate_limit)])
 def run_hybrid_rag_query(
     req: QueryRequest,
     current_user: Optional[User] = Depends(get_current_user_optional),
@@ -751,6 +757,7 @@ def run_hybrid_rag_query(
 ):
     """Answers a question using code retrieved from THIS workspace's vector index."""
     _verify_workspace_access(req.workspace_id, current_user, db)
+    ws_id = req.workspace_id.strip()
     query = req.query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query is empty.")
@@ -851,7 +858,7 @@ def run_hybrid_rag_query(
 
     api_key = _resolve_key(provider=provider, req_key=incoming_key, current_user=current_user)
 
-    is_demo = req.workspace_id in DEMO_WORKSPACE_IDS
+    is_demo = ws_id in DEMO_WORKSPACE_IDS
     if is_demo and not api_key:
         exec_t = round(time.time() - t0, 3)
         return _demo_answer(query, model_alias=model_alias, execution_time=exec_t)
@@ -875,7 +882,7 @@ def run_hybrid_rag_query(
 
     retrieval_k = req.top_k or 5
     try:
-        chunks = _retrieve(req.workspace_id, search_query, top_k=retrieval_k) if not is_conversational else []
+        chunks = _retrieve(ws_id, search_query, top_k=retrieval_k) if not is_conversational else []
     except HTTPException as e:
         if is_demo and e.status_code == 409:
             exec_t = round(time.time() - t0, 3)
@@ -893,15 +900,21 @@ def run_hybrid_rag_query(
                     sources.append(fp)
 
     if not api_key:
-        excerpts_text = "\n\n".join(
-            f"• File: {c.get('filepath')} (lines {c.get('start_line')}-{c.get('end_line')}):\n{c.get('snippet', '')[:280]}..."
-            for c in chunks[:3]
-        )
-        msg = (
-            f"Retrieved {len(chunks)} relevant excerpt(s) from this repository for '{query}':\n\n"
-            f"{excerpts_text}\n\n"
-            f"💡 Note: No API key configured for provider '{provider.upper()}'. Please add your {provider.upper()} API key in the Key Vault for full conversational AI responses."
-        )
+        if not chunks:
+            msg = (
+                f"No code excerpts found matching your query '{query}' in this repository index.\n\n"
+                f"💡 Note: No API key configured for provider '{provider.upper()}'. Please verify the workspace is indexed or add your {provider.upper()} API key in the Key Vault."
+            )
+        else:
+            excerpts_text = "\n\n".join(
+                f"• File: {c.get('filepath')} (lines {c.get('start_line')}-{c.get('end_line')}):\n{c.get('snippet', '')[:280]}..."
+                for c in chunks[:3]
+            )
+            msg = (
+                f"Retrieved {len(chunks)} relevant excerpt(s) from this repository for '{query}':\n\n"
+                f"{excerpts_text}\n\n"
+                f"💡 Note: No API key configured for provider '{provider.upper()}'. Please add your {provider.upper()} API key in the Key Vault for full conversational AI responses."
+            )
         execution_time = round(time.time() - t0, 3)
         return {
             "answer": msg,
@@ -932,7 +945,7 @@ def run_hybrid_rag_query(
         "5. BLAST RADIUS: When asked about refactoring or impact, trace exact upstream callers, downstream callees, and cross-file imports.\n\n6. FACTUAL CODE GROUNDING & BUG VERIFICATION: When asked about potential bugs, runtime errors, or exceptions, you MUST inspect the actual code for defensive guards (such as if-statements checking null/undefined, optional chaining ?., or try/catch blocks). NEVER report a runtime exception (e.g. TypeError: Cannot read properties of undefined) if the code already guards against it. If the code is safe, state clearly that it is protected.\n\n7. REAL CODE VS STRING FIXTURES: Only treat actual source files as real implementations. Never mistake mock architecture dictionaries, demo maps, or string fixtures in backend scripts for live services or microservices.\n\n8. STRICT HONESTY: If a feature or error does not exist in the code, state that directly. Never invent speculative failure points to satisfy a leading question.\n\n"
         f"{history_context}"
         f"Relevant Code Excerpts from repository:\n"
-        f"{_format_context(chunks)}\n\n"
+        f"{_format_context(chunks) if chunks else 'No code snippets found in repository index for this query.'}\n\n"
         f"User Question: {query}"
     )
     answer, telemetry = completion_with_telemetry(
@@ -954,7 +967,7 @@ def run_hybrid_rag_query(
     }
 
 
-@router.post("/search")
+@router.post("/search", dependencies=[Depends(require_rag_rate_limit)])
 def execute_rag_qa_search(
     req: RAGSearchRequest,
     current_user: Optional[User] = Depends(get_current_user_optional),
@@ -965,7 +978,7 @@ def execute_rag_qa_search(
     return run_hybrid_rag_query(req, current_user, db)
 
 
-@router.post("/refactor")
+@router.post("/refactor", dependencies=[Depends(require_rag_rate_limit)])
 def generate_refactor(
     req: RefactorRequest,
     current_user: Optional[User] = Depends(get_current_user_optional),
@@ -973,20 +986,62 @@ def generate_refactor(
 ):
     """Asks the model for unified diffs and side-by-side snippets against the workspace's real files."""
     _verify_workspace_access(req.workspace_id, current_user, db)
+    ws_id = req.workspace_id.strip()
     prompt_text = req.prompt.strip()
     if not prompt_text:
         raise HTTPException(status_code=400, detail="Refactor prompt is empty.")
     
-    incoming_key = req.gemini_api_key or getattr(req, "api_key", None)
-    provider = getattr(req, "provider", "gemini") or "gemini"
+    # 1. Resolve Provider, Model, and API Key
+    provider = (getattr(req, "provider", None) or "gemini").lower().strip()
+    raw_model = (getattr(req, "model", None) or getattr(req, "model_id", None) or "").strip()
+    if not raw_model:
+        provider_defaults = {
+            "gemini": "gemini-3.8-flash",
+            "openai": "gpt-4o",
+            "anthropic": "claude-3-5-sonnet",
+            "groq": "llama-3.3-70b-versatile",
+            "deepseek": "deepseek-chat",
+        }
+        raw_model = provider_defaults.get(provider, "gemini-3.8-flash")
+
+    if "/" in raw_model:
+        prefix, name = raw_model.split("/", 1)
+        if prefix.lower() in ("groq", "openai", "anthropic", "deepseek", "gemini"):
+            if not provider or provider == "gemini":
+                provider = prefix.lower()
+            model_alias = raw_model
+        else:
+            model_alias = raw_model
+    else:
+        model_alias = raw_model
+
+    if not provider:
+        if any(k in model_alias.lower() for k in ["llama", "mixtral", "gsk_"]):
+            provider = "groq"
+        elif any(k in model_alias.lower() for k in ["gpt", "o1", "o3"]):
+            provider = "openai"
+        elif "claude" in model_alias.lower():
+            provider = "anthropic"
+        elif "deepseek" in model_alias.lower():
+            provider = "deepseek"
+        else:
+            provider = "gemini"
+
+    thinking_level = getattr(req, "thinking_level", "medium") or "medium"
+    thinking_budget = THINKING_BUDGETS.get(thinking_level, 4096)
+
+    incoming_key = getattr(req, "api_key", None)
+    if not incoming_key and provider == "gemini":
+        incoming_key = req.gemini_api_key
+
     api_key = _resolve_key(provider=provider, req_key=incoming_key, current_user=current_user)
-    is_demo = req.workspace_id in DEMO_WORKSPACE_IDS
+    is_demo = ws_id in DEMO_WORKSPACE_IDS
     if is_demo and not api_key:
         return _demo_refactor(prompt_text, req.previous_diffs)
 
     # 1. Retrieve relevant code chunks
     try:
-        chunks = _retrieve(req.workspace_id, prompt_text, top_k=6)
+        chunks = _retrieve(ws_id, prompt_text, top_k=6)
     except HTTPException as e:
         if is_demo and e.status_code == 409:
             return _demo_refactor(prompt_text, req.previous_diffs)
@@ -1009,7 +1064,12 @@ def generate_refactor(
         target_chunks = matched_chunks
 
     if not api_key:
-        return _demo_refactor(prompt_text, req.previous_diffs)
+        if is_demo:
+            return _demo_refactor(prompt_text, req.previous_diffs)
+        raise HTTPException(
+            status_code=400,
+            detail=f"An API key for provider '{provider.upper()}' is required to generate refactorings. Please add your key in the Key Vault.",
+        )
 
     prev_context = ""
     if req.previous_diffs:
@@ -1042,15 +1102,37 @@ def generate_refactor(
         '}\n'
         "Only change files shown in the excerpts. Always provide realistic, syntactically valid code in old_code, new_code, and diffCode. Never output placeholder comments like '// Original code' or '// Refactored'."
     )
-    data = _parse_json(_call_gemini(api_key, prompt, json_mode=True))
+    if provider == "gemini":
+        try:
+            model_reply = _call_gemini(api_key, prompt, json_mode=True)
+        except Exception:
+            model_reply, _ = completion_with_telemetry(
+                model_alias=model_alias,
+                prompt=prompt,
+                thinking_budget=thinking_budget,
+                provider=provider,
+                api_key=api_key,
+                temperature=0.0,
+            )
+    else:
+        model_reply, _ = completion_with_telemetry(
+            model_alias=model_alias,
+            prompt=prompt,
+            thinking_budget=thinking_budget,
+            provider=provider,
+            api_key=api_key,
+            temperature=0.0,
+        )
+
+    data = _parse_json(model_reply)
     diffs = []
     for d in data.get("diffs", []):
         if not (isinstance(d, dict) and d.get("diffCode")):
             continue
         d_code = str(d.get("diffCode", ""))
         file_path = str(d.get("file", ""))
-        old_snip = str(d.get("old_code", "")).strip()
-        new_snip = str(d.get("new_code", "")).strip()
+        old_snip = str(d.get("old_code", "")).strip() if d.get("old_code") is not None else ""
+        new_snip = str(d.get("new_code", "")).strip() if d.get("new_code") is not None else ""
         if not old_snip or not new_snip:
             extracted_old, extracted_new = _extract_snippets_from_diff(d_code)
             old_snip = old_snip or extracted_old

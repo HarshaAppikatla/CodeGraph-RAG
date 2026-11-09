@@ -13,23 +13,49 @@ export const IGNORED_EXTENSIONS = [
 ];
 
 /**
- * Strips node_modules, .venv, binaries, and build artifacts directly in the browser.
- * Reduces a 500 MB - 1 GB upload down to ~2 MB of pure source code in seconds.
+ * Maximum zip archive size (50 MB) processed in browser memory.
+ * Archives larger than this threshold bypass in-browser JSZip decoding to prevent
+ * tab memory exhaustion (OOM), streaming directly to the backend which performs
+ * memory-efficient disk-buffered extraction and filtering.
+ */
+export const MAX_BROWSER_ZIP_BYTES = 50 * 1024 * 1024;
+
+/**
+ * Strips node_modules, .venv, binaries, and build artifacts directly in the browser
+ * when archive size is within safe in-memory browser thresholds (<= 50 MB).
+ * For archives > 50 MB, safely bypasses browser JSZip to prevent tab crash/OOM
+ * and delegates filtering to backend streaming disk extraction.
  *
  * @param {File} rawFile - The raw user-selected .zip file
  * @param {Function} [onProgress] - Optional callback receiving progress text
- * @returns {Promise<{ cleanFile: File, originalSizeMB: string, cleanSizeMB: string, skippedFiles: number, totalFiles: number, savedPercent: string }>}
+ * @returns {Promise<{ cleanFile: File, originalSizeMB: string, cleanSizeMB: string, skippedFiles: number, totalFiles: number, savedPercent: string, bypassed?: boolean }>}
  */
 export async function preFilterProjectZip(rawFile, onProgress) {
   const originalBytes = rawFile.size;
   const originalSizeMB = (originalBytes / (1024 * 1024)).toFixed(1);
+
+  // If archive exceeds 50 MB, bypass in-browser JSZip decoding to prevent crashing tab / OOM
+  if (originalBytes > MAX_BROWSER_ZIP_BYTES) {
+    if (onProgress) {
+      onProgress(`Archive exceeds safe browser memory threshold (${originalSizeMB} MB > 50 MB). Streaming directly to backend for disk-buffered extraction...`);
+    }
+    return {
+      cleanFile: rawFile,
+      originalSizeMB,
+      cleanSizeMB: originalSizeMB,
+      skippedFiles: 0,
+      totalFiles: 0,
+      savedPercent: '0.0',
+      bypassed: true
+    };
+  }
+
   if (onProgress) onProgress(`Loading raw ZIP archive (${originalSizeMB} MB)...`);
 
   const zip = await JSZip.loadAsync(rawFile);
-  const cleanZip = new JSZip();
-
   let totalFiles = 0;
   let skippedFiles = 0;
+  const toRemove = [];
 
   const entries = Object.keys(zip.files);
   const totalEntries = entries.length;
@@ -58,21 +84,36 @@ export async function preFilterProjectZip(rawFile, onProgress) {
 
     if (isIgnoredDir || isIgnoredExt) {
       skippedFiles++;
-      continue;
+      toRemove.push(relativePath);
     }
-
-    // Extract file bytes and add to clean ZIP
-    const fileData = await zipEntry.async('uint8array');
-    cleanZip.file(relativePath, fileData);
   }
 
   if (totalFiles > 0 && totalFiles === skippedFiles) {
     throw new Error('All files in the archive are ignored dependencies or binaries. No source code files found to index.');
   }
 
+  // If no bloat files were detected, return raw file directly without re-encoding
+  if (skippedFiles === 0) {
+    return {
+      cleanFile: rawFile,
+      originalSizeMB,
+      cleanSizeMB: originalSizeMB,
+      skippedFiles: 0,
+      totalFiles,
+      savedPercent: '0.0',
+      bypassed: false
+    };
+  }
+
+  // Prune bloat entries in-place directly from the loaded zip structure
+  // This avoids decompressing all non-bloat files into Uint8Arrays in browser memory
+  for (let i = 0; i < toRemove.length; i++) {
+    zip.remove(toRemove[i]);
+  }
+
   if (onProgress) onProgress(`Generating clean source archive (Filtered ${skippedFiles} bloat files)...`);
 
-  const cleanBlob = await cleanZip.generateAsync({
+  const cleanBlob = await zip.generateAsync({
     type: 'blob',
     compression: 'DEFLATE',
     compressionOptions: { level: 6 }
@@ -92,7 +133,8 @@ export async function preFilterProjectZip(rawFile, onProgress) {
     cleanSizeMB,
     skippedFiles,
     totalFiles,
-    savedPercent
+    savedPercent,
+    bypassed: false
   };
 }
 

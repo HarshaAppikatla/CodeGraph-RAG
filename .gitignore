@@ -231,4 +231,6 @@ qdrant_data/
 # Git patch files
 *.patch
 .neon
+.agents/
 node_modules/
+frontend/dist/

@@ -43,18 +43,25 @@ def ingest_codebase(vector_store: CodeVectorStore):
     doc_id_counter = 1
     total_indexed = 0
 
+    parsed = []
     for filepath in module_files:
         if "__init__.py" in filepath:
             continue
-
         parser = CodeASTParser(filepath)
         ast_data = parser.extract_structures()
-
         fn_count = len(ast_data.get("functions", []))
         cls_count = len(ast_data.get("classes", []))
         const_count = len(ast_data.get("constants", []))
         calls_count = len(ast_data.get("calls", []))
         print(f"📦 Processing '{filepath}' -> Extracted: {cls_count} classes, {fn_count} functions, {calls_count} call sites")
+        parsed.append({"rel": filepath, "ast": ast_data})
+
+    from backend.app.services.repo_ingestor import resolve_calls
+    resolve_calls(parsed)
+
+    for item in parsed:
+        filepath = item["rel"]
+        ast_data = item["ast"]
 
         if graph_store:
             try:

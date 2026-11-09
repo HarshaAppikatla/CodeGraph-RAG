@@ -51,15 +51,10 @@ def _is_valid_provider_key(prov: str, key_val: Optional[str]) -> bool:
 
 
 def _compute_status_map(existing_keys: Dict[str, str]) -> Dict[str, bool]:
-    """Computes whether each provider has a valid key configured in DB or environment."""
+    """Computes whether each provider has a valid key configured by the active user in their vault."""
     status_map = {}
     for prov in SUPPORTED_PROVIDERS:
-        key_val = existing_keys.get(prov)
-        if not key_val:
-            env_var = ENV_MAP.get(prov, "")
-            key_val = os.getenv(env_var, "").strip() if env_var else ""
-        if prov == "gemini" and not key_val and settings.GEMINI_API_KEY:
-            key_val = settings.GEMINI_API_KEY.strip()
+        key_val = existing_keys.get(prov, "")
         status_map[prov] = _is_valid_provider_key(prov, key_val)
     return status_map
 
@@ -514,7 +509,10 @@ def get_keys_status(
     current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
-    """Returns provider key configuration status and safe masked previews for the active user."""
+    """Returns provider key configuration status and safe masked previews strictly for the active user session.
+
+    Never exposes or reports the backend server's environment keys to guests or other users.
+    """
     existing_keys = get_user_encrypted_keys(user=current_user) if current_user else {}
 
     status_map = _compute_status_map(existing_keys)
@@ -522,14 +520,8 @@ def get_keys_status(
 
     for prov in SUPPORTED_PROVIDERS:
         key_val = existing_keys.get(prov)
-        if not key_val:
-            env_var = ENV_MAP.get(prov, "")
-            key_val = os.getenv(env_var, "").strip() if env_var else ""
-        if prov == "gemini" and not key_val and settings.GEMINI_API_KEY:
-            key_val = settings.GEMINI_API_KEY.strip()
-
         is_configured = status_map.get(prov, False)
-        # Only provide masked previews if user is authenticated
+        # Only provide masked previews for the user's own keys if user is authenticated
         masked_map[prov] = mask_api_key(key_val) if (is_configured and key_val and current_user) else None
 
     # Merge status_map top-level keys for direct spec matching: { "gemini": true, "openai": false, ... }

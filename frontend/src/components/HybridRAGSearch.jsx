@@ -4,15 +4,10 @@ import {
   Sparkles, 
   RefreshCw, 
   Bot, 
-  User, 
-  Cpu, 
-  Zap, 
-  Brain, 
-  Code, 
-  Layers, 
-  Info 
+  User 
 } from 'lucide-react';
-import DynamicModelSelector, { AVAILABLE_MODELS } from './DynamicModelSelector';
+import DynamicModelSelector from './DynamicModelSelector';
+import { AVAILABLE_MODELS } from '../constants/models';
 import KeyVaultModal from './KeyVaultModal';
 import ChatMessageContent from './ChatMessageContent';
 import { api } from '../services/api';
@@ -100,27 +95,45 @@ export default function HybridRAGSearch({
     }
   });
 
+  const [prevGeminiProp, setPrevGeminiProp] = useState(geminiApiKey);
+  if (geminiApiKey !== prevGeminiProp) {
+    setPrevGeminiProp(geminiApiKey);
+    if (geminiApiKey) {
+      setActiveKeys(prev => ({ ...prev, gemini: geminiApiKey }));
+    }
+  }
+
   const [keysStatus, setKeysStatus] = useState({});
 
-  const refreshKeysStatus = async () => {
-    try {
-      const res = await api.getKeysStatus();
-      if (res) {
-        setKeysStatus(res.status || res);
-      }
-    } catch {}
-  };
-
   useEffect(() => {
-    refreshKeysStatus();
+    let active = true;
+    (async () => {
+      try {
+        const res = await api.getKeysStatus();
+        if (active && res) {
+          setKeysStatus(res.status || res);
+        }
+      } catch {}
+    })();
+    return () => {
+      active = false;
+    };
   }, []);
 
-  // Sync gemini key changes
+  // Sync gemini key changes to backend status
   useEffect(() => {
-    if (geminiApiKey && geminiApiKey !== activeKeys.gemini) {
-      setActiveKeys(prev => ({ ...prev, gemini: geminiApiKey }));
-      refreshKeysStatus();
+    let active = true;
+    if (geminiApiKey) {
+      (async () => {
+        try {
+          const res = await api.getKeysStatus();
+          if (active && res) setKeysStatus(res.status || res);
+        } catch {}
+      })();
     }
+    return () => {
+      active = false;
+    };
   }, [geminiApiKey]);
 
   // Persist provider keys
@@ -186,6 +199,18 @@ export default function HybridRAGSearch({
   const handleSearch = async () => {
     const query = searchQuery.trim();
     if (!query || loading) return;
+    if (!activeWorkspace) {
+      setQaMessages(prev => [
+        ...prev,
+        { sender: 'user', text: query },
+        { sender: 'assistant', text: '⚠️ Please select a workspace before querying.', sources: [] }
+      ]);
+      setSearchQuery('');
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
+      return;
+    }
 
     const userMsg = { sender: 'user', text: query };
     setQaMessages(prev => [...prev, userMsg]);

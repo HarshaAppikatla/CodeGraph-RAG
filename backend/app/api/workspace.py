@@ -16,13 +16,15 @@ from backend.app.database import get_db, SessionLocal
 from backend.app.models.workspace import Workspace
 from backend.app.models.user import User, is_demo_user
 from backend.app.api.auth import get_current_user_optional
-from backend.app.services.repo_ingestor import RepositoryIngestor
+from backend.app.services.repo_ingestor import (
+    RepositoryIngestor, cancel_job, is_job_cancelled, clear_job_cancellation
+)
 from backend.app.services.registry import get_vector_store, get_graph_store
 
 logger = logging.getLogger("codegraph.ingest")
 router = APIRouter(prefix="/workspace", tags=["Workspaces"])
 
-MAX_ZIP_BYTES = 500 * 1024 * 1024  # Server-side safety cap (500 MB)
+MAX_ZIP_BYTES = 1024 * 1024 * 1024  # Server-side safety cap (1 GB)
 
 # In-memory tracking of currently running ingestion jobs (Option B)
 _ACTIVE_INGESTION_JOBS_LOCK = Lock()
@@ -95,6 +97,10 @@ def _finish_ingestion(workspace_id: str, res: dict) -> None:
             ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
             if not ws:
                 return
+            # If the job was cancelled or already marked FAILED by timeout or restart, do not revive it!
+            if is_job_cancelled(workspace_id) or ws.status == "FAILED":
+                logger.info("Ingestion finished for already-cancelled/failed workspace %s; preserving status %s", workspace_id, ws.status)
+                return
             if res.get("status") != "success":
                 err_msg = res.get("message") or "Ingestion failed."
                 INGEST_ERRORS[ws.id] = err_msg
@@ -107,20 +113,65 @@ def _finish_ingestion(workspace_id: str, res: dict) -> None:
                 ws.status = "FAILED"
             else:
                 summary = res.get("indexing_summary", {})
-                ws.status = "READY"
-                ws.error_message = None
-                if res.get("branch"):
-                    ws.branch = res["branch"]
-                ws.files_count = res.get("total_files", 0)
-                ws.nodes_count = summary.get("graph_nodes", 0)
-                ws.edges_count = summary.get("graph_edges", 0)
-                languages = summary.get("languages") or []
-                ws.language = " / ".join(languages[:2]) if languages else "Polyglot"
-                INGEST_ERRORS.pop(ws.id, None)
-                logger.info(
-                    "🎉 Workspace %s ingestion READY: %d files, %d nodes, %d edges, %d vectors",
-                    ws.id, ws.files_count, ws.nodes_count, ws.edges_count, summary.get("vector_chunks", 0)
-                )
+                graph_ok = summary.get("graph_ok", False)
+                vector_ok = summary.get("vector_ok", False)
+                graph_nodes = summary.get("graph_nodes", 0)
+                vector_chunks = summary.get("vector_chunks", 0)
+
+                if not graph_ok and not vector_ok:
+                    # Neither backend accepted any writes — treat as FAILED so the UI
+                    # doesn't show READY with inflated parser-estimate counts.
+                    err_msg = (
+                        "Indexing completed but no data was written to either the graph store "
+                        "(Neo4j may be down) or the vector store (embedding model may have failed to load). "
+                        f"Parser saw {graph_nodes} nodes and {vector_chunks} vector chunks, but none were committed."
+                    )
+                    INGEST_ERRORS[ws.id] = err_msg
+                    ws.error_message = err_msg
+                    ws.status = "FAILED"
+                    ws.nodes_count = 0
+                    ws.edges_count = 0
+                else:
+                    if graph_ok and not vector_ok:
+                        ws.status = "PARTIAL"
+                        ws.error_message = (
+                            "Graph store indexed successfully, but vector embeddings could not be stored "
+                            "(embedding model may have failed to load). Semantic search will not work."
+                        )
+                        INGEST_ERRORS[ws.id] = ws.error_message
+                    elif vector_ok and not graph_ok:
+                        ws.status = "PARTIAL"
+                        ws.error_message = (
+                            "Vector embeddings indexed successfully, but graph store writes failed "
+                            "(Neo4j may be down). Blast-radius and impact analysis will not work."
+                        )
+                        INGEST_ERRORS[ws.id] = ws.error_message
+                    else:
+                        truncation_warning = res.get("warning") or summary.get("warning")
+                        if truncation_warning:
+                            ws.status = "PARTIAL"
+                            ws.error_message = truncation_warning
+                            INGEST_ERRORS[ws.id] = truncation_warning
+                        else:
+                            # Both backends confirmed real writes and no truncation
+                            ws.status = "READY"
+                            ws.error_message = None
+                            INGEST_ERRORS.pop(ws.id, None)
+
+                    if res.get("branch"):
+                        ws.branch = res["branch"]
+                    ws.files_count = res.get("total_files", 0)
+                    # Store only confirmed write counts, not parser estimates
+                    ws.nodes_count = summary.get("graph_nodes", 0) if graph_ok else 0
+                    ws.edges_count = summary.get("graph_edges", 0) if graph_ok else 0
+                    languages = summary.get("languages") or []
+                    ws.language = " / ".join(languages[:2]) if languages else "Polyglot"
+                    logger.info(
+                        "🎉 Workspace %s ingestion %s: %d files (total found: %s), %d nodes, %d edges, %d vectors "
+                        "(graph_ok=%s, vector_ok=%s)",
+                        ws.id, ws.status, ws.files_count, res.get("total_files_found", ws.files_count),
+                        ws.nodes_count, ws.edges_count, vector_chunks, graph_ok, vector_ok
+                    )
             db.commit()
     except Exception as e:
         logger.exception("Failed to finish ingestion for workspace %s: %s", workspace_id, e)
@@ -151,6 +202,7 @@ def _run_background_git_ingestion(workspace_id: str, repo_url: str, branch: str)
         _fail_ingestion(workspace_id, e)
     finally:
         _unregister_active_job(workspace_id)
+        clear_job_cancellation(workspace_id)
 
 
 def _run_background_zip_ingestion(workspace_id: str, temp_zip_path: str):
@@ -163,6 +215,7 @@ def _run_background_zip_ingestion(workspace_id: str, temp_zip_path: str):
         _fail_ingestion(workspace_id, e)
     finally:
         _unregister_active_job(workspace_id)
+        clear_job_cancellation(workspace_id)
         if os.path.exists(temp_zip_path):
             try:
                 os.remove(temp_zip_path)
@@ -171,74 +224,101 @@ def _run_background_zip_ingestion(workspace_id: str, temp_zip_path: str):
 
 
 def _reconcile_indexing_workspace(ws: Workspace, db: Session) -> Workspace:
-    """Universal Auto-Reconciliation: If a workspace is INDEXING, check if Neo4j already indexed nodes for it."""
-    if not ws or ws.status != "INDEXING":
+    """Universal Auto-Reconciliation:
+    1. If INDEXING, check if background job finished or was interrupted by a restart.
+    2. If READY or PARTIAL, verify vector and graph store persistence to catch data loss on restart.
+    """
+    if not ws:
         return ws
 
-    # If the background job is actively running in this process, DO NOT prematurely reconcile!
-    # Let the running ingest thread finish all files and call _finish_ingestion cleanly.
-    if _is_job_active(ws.id):
-        return ws
+    # Health check for READY / PARTIAL workspaces: detect data loss after server restart
+    if ws.status in ("READY", "PARTIAL"):
+        is_demo_ws = ws.id.startswith("ws-demo-") or any(dw["id"] == ws.id for dw in DEMO_WORKSPACES)
+        if not is_demo_ws and ws.files_count > 0:
+            try:
+                vs = get_vector_store()
+                vec_cnt = vs.count_workspace_vectors(ws.id) if (vs and hasattr(vs, "count_workspace_vectors")) else None
+            except Exception as ve:
+                logger.warning("Vector health check error for %s: %s", ws.id, ve)
+                vec_cnt = None
 
-    try:
-        gs = get_graph_store()
-        if gs and gs.driver:
-            with gs.driver.session() as session:
-                f_res = session.run('MATCH (f:File {ws: $ws}) RETURN count(f) as cnt', ws=ws.id).single()
-                files_cnt = f_res['cnt'] if f_res else 0
-                n_res = session.run('MATCH (n {ws: $ws}) RETURN count(n) as cnt', ws=ws.id).single()
-                nodes_cnt = n_res['cnt'] if n_res else 0
-                e_res = session.run('MATCH (a {ws: $ws})-[r]->(b {ws: $ws}) RETURN count(r) as cnt', ws=ws.id).single()
-                edges_cnt = e_res['cnt'] if e_res else 0
+            try:
+                gs = get_graph_store()
+                graph_cnt = gs.count_workspace_nodes(ws.id) if (gs and hasattr(gs, "count_workspace_nodes") and gs.driver) else None
+            except Exception as ge:
+                logger.warning("Graph health check error for %s: %s", ws.id, ge)
+                graph_cnt = None
 
-                if nodes_cnt > 0:
-                    ws.status = "READY"
-                    ws.files_count = files_cnt or 1
-                    ws.nodes_count = nodes_cnt
-                    ws.edges_count = edges_cnt
-                    ws.error_message = None
-                    if ws.language in ("Detecting...", "Unknown"):
-                        ws.language = "Polyglot"
-                    db.commit()
-                    db.refresh(ws)
-                    logger.info("Auto-reconciled workspace %s (%s) to READY (%d nodes)", ws.id, ws.name, nodes_cnt)
+            if vec_cnt is not None or graph_cnt is not None:
+                v_count = vec_cnt or 0
+                g_count = graph_cnt or 0
+                db_ws = db.query(Workspace).filter(Workspace.id == ws.id).first() if ws not in db else ws
+                if not db_ws:
                     return ws
-    except Exception as err:
-        logger.warning("Reconciliation check error for %s: %s", ws.id, err)
 
-    # Stale indexing check (Option B with Option A safety cap):
-    # - If job is active in this process: do not interrupt slow 0.1 vCPU ingests up to 20 mins.
-    # - If job is NOT in _ACTIVE_INGESTION_JOBS: process restarted/crashed, mark FAILED after 30s.
-    try:
-        if ws.created_at:
-            created_tz = ws.created_at.replace(tzinfo=timezone.utc) if ws.created_at.tzinfo is None else ws.created_at
-            elapsed_seconds = (datetime.now(timezone.utc) - created_tz).total_seconds()
-            is_active = _is_job_active(ws.id)
-
-            db_ws = db.query(Workspace).filter(Workspace.id == ws.id).first() if ws not in db else ws
-            if not db_ws:
-                return ws
-
-            if is_active:
-                if elapsed_seconds > 1200:  # 20 minutes safety cap
+                if v_count == 0 and g_count == 0:
                     db_ws.status = "FAILED"
-                    db_ws.error_message = "Ingestion exceeded maximum safety cap (20 minutes). Please try a smaller repository."
+                    db_ws.error_message = "Indexed data was lost after server restart. Please re-index this repository."
                     INGEST_ERRORS[db_ws.id] = db_ws.error_message
                     db.commit()
                     db.refresh(db_ws)
-                    logger.warning("Active workspace %s exceeded 20m safety cap, marked FAILED", db_ws.id)
+                    logger.warning("Workspace %s data lost after restart -> marked FAILED", db_ws.id)
                     return db_ws
-            else:
-                if elapsed_seconds > 30:
-                    db_ws.status = "FAILED"
-                    db_ws.error_message = "Ingestion interrupted by server restart. Please re-index."
+                elif v_count == 0 and g_count > 0 and db_ws.status == "READY":
+                    db_ws.status = "PARTIAL"
+                    db_ws.error_message = "Vector embeddings were lost after server restart. Semantic search is unavailable. Please re-index."
                     INGEST_ERRORS[db_ws.id] = db_ws.error_message
                     db.commit()
                     db.refresh(db_ws)
-                    logger.info("Auto-marked restart-orphaned INDEXING workspace %s (%s) as FAILED", db_ws.id, db_ws.name)
+                    logger.warning("Workspace %s vectors lost after restart -> downgraded to PARTIAL", db_ws.id)
                     return db_ws
-    except Exception as time_err:
-        logger.warning("Stale indexing timeout check notice for %s: %s", ws.id, time_err)
+                elif g_count == 0 and v_count > 0 and db_ws.status == "READY":
+                    db_ws.status = "PARTIAL"
+                    db_ws.error_message = "Knowledge graph was lost after server restart. Blast radius and architecture views are unavailable. Please re-index."
+                    INGEST_ERRORS[db_ws.id] = db_ws.error_message
+                    db.commit()
+                    db.refresh(db_ws)
+                    logger.warning("Workspace %s graph lost after restart -> downgraded to PARTIAL", db_ws.id)
+                    return db_ws
+
+        return ws
+
+    if ws.status != "INDEXING":
+        return ws
+
+    is_active = _is_job_active(ws.id)
+    created_tz = ws.created_at.replace(tzinfo=timezone.utc) if (ws.created_at and ws.created_at.tzinfo is None) else (ws.created_at or datetime.now(timezone.utc))
+    elapsed_seconds = (datetime.now(timezone.utc) - created_tz).total_seconds()
+
+    db_ws = db.query(Workspace).filter(Workspace.id == ws.id).first() if ws not in db else ws
+    if not db_ws:
+        return ws
+
+    # 1. Job is actively running in this process
+    if is_active:
+        if elapsed_seconds > 1200:  # 20 minutes safety cap
+            cancel_job(ws.id)
+            db_ws.status = "FAILED"
+            db_ws.error_message = "Ingestion exceeded maximum safety cap (20 minutes). Please try a smaller repository."
+            INGEST_ERRORS[db_ws.id] = db_ws.error_message
+            db.commit()
+            db.refresh(db_ws)
+            logger.warning("Active workspace %s exceeded 20m safety cap, marked FAILED and halted thread", db_ws.id)
+            return db_ws
+        return ws
+
+    # 2. Job is NOT active in this process: server restarted or process crashed.
+    # Never reconcile an incomplete or interrupted job to READY just because partial nodes exist!
+    # Allow 15s grace period for freshly queued background tasks to register in _ACTIVE_INGESTION_JOBS.
+    if elapsed_seconds > 15:
+        cancel_job(ws.id)
+        db_ws.status = "FAILED"
+        db_ws.error_message = "Ingestion interrupted by server restart. Please re-index."
+        INGEST_ERRORS[db_ws.id] = db_ws.error_message
+        db.commit()
+        db.refresh(db_ws)
+        logger.info("Auto-marked restart-orphaned INDEXING workspace %s (%s) as FAILED", db_ws.id, db_ws.name)
+        return db_ws
 
     return ws
 
@@ -351,27 +431,43 @@ def delete_workspace(
     ws = _owned_workspace(db, workspace_id, current_user)
     ws_name = ws.name
 
-    # 3. Purge error cache
+    # 3. Purge error cache and signal cancellation to any running background thread
     INGEST_ERRORS.pop(ws.id, None)
+    cancel_job(ws.id)
 
     # 4. Detach and delete all nodes and relationships in Neo4j
     deleted_nodes = 0
+    cleanup_errors = []
+
     try:
         gs = get_graph_store()
-        if gs:
+        if gs and hasattr(gs, "delete_workspace"):
             deleted_nodes = gs.delete_workspace(ws.id)
     except Exception as ge:
-        logger.warning("Neo4j deletion notice for workspace %s: %s", ws.id, ge)
+        logger.error("Neo4j deletion failed for workspace %s: %s", ws.id, ge)
+        cleanup_errors.append(f"Graph store cleanup failed: {ge}")
 
     # 5. Delete vector embeddings in Qdrant
     try:
         vs = get_vector_store()
-        if vs:
+        if vs and hasattr(vs, "delete_workspace"):
             vs.delete_workspace(ws.id)
     except Exception as ve:
-        logger.warning("Qdrant deletion notice for workspace %s: %s", ws.id, ve)
+        logger.error("Qdrant deletion failed for workspace %s: %s", ws.id, ve)
+        cleanup_errors.append(f"Vector store cleanup failed: {ve}")
 
-    # 6. Delete workspace record from PostgreSQL database
+    # If any external storage service failed to delete data, DO NOT delete workspace record from DB!
+    # Retaining the DB row prevents orphaned data in Neo4j/Qdrant and allows retry.
+    if cleanup_errors:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Failed to cleanly delete workspace '{ws_name}'. Data cleanup error in backend storage. "
+                f"The workspace record was retained to prevent orphaned data. Errors: {'; '.join(cleanup_errors)}"
+            ),
+        )
+
+    # 6. Delete workspace record from database only when external stores succeeded
     db.delete(ws)
     db.commit()
 
@@ -399,6 +495,33 @@ async def ingest_workspace(
             detail="Authentication required to ingest a workspace. Please sign in or click 1-Click Demo.",
         )
     user_id = current_user.id
+
+    max_concurrent = int(os.getenv("MAX_CONCURRENT_INGESTIONS_PER_USER") or getattr(settings, "MAX_CONCURRENT_INGESTIONS_PER_USER", 1))
+    max_workspaces = int(os.getenv("MAX_WORKSPACES_PER_USER") or getattr(settings, "MAX_WORKSPACES_PER_USER", 25))
+
+    # Reconcile existing indexing workspaces for this user to ensure dead jobs from restarts are cleared
+    existing_indexing = db.query(Workspace).filter(Workspace.user_id == user_id, Workspace.status == "INDEXING").all()
+    for active_ws in existing_indexing:
+        _reconcile_indexing_workspace(active_ws, db)
+
+    # 1. Check total workspaces limit per user
+    user_workspaces_count = db.query(Workspace).filter(Workspace.user_id == user_id).count()
+    if user_workspaces_count >= max_workspaces:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Workspace limit reached. You have {user_workspaces_count} workspaces (maximum {max_workspaces}). Please delete an existing workspace before ingesting a new one."
+        )
+
+    # 2. Check active concurrent ingestion limit per user
+    active_user_ingestions = db.query(Workspace).filter(
+        Workspace.user_id == user_id,
+        Workspace.status == "INDEXING"
+    ).count()
+    if active_user_ingestions >= max_concurrent:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Concurrent ingestion limit reached. You already have an active ingestion job running (maximum {max_concurrent}). Please wait for it to complete."
+        )
 
     content_type = request.headers.get("content-type", "")
 

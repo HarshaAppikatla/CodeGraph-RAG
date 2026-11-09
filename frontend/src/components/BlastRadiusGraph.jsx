@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
-import { ZoomIn, ZoomOut, RefreshCw, Layers, ShieldAlert, Activity } from 'lucide-react';
+import { ZoomIn, ZoomOut, RefreshCw, Layers, ShieldAlert } from 'lucide-react';
 
 export const BlastRadiusGraph = ({ graphData, onSelectNode, selectedNodeId }) => {
   const svgRef = useRef(null);
@@ -9,8 +9,6 @@ export const BlastRadiusGraph = ({ graphData, onSelectNode, selectedNodeId }) =>
   const [tooltip, setTooltip] = useState(null);
 
   const {
-    nodes = [],
-    edges = [],
     name: targetName = 'Target Symbol',
     riskScore = 'N/A',
     riskLevel = 'LOW'
@@ -35,6 +33,8 @@ export const BlastRadiusGraph = ({ graphData, onSelectNode, selectedNodeId }) =>
   };
 
   useEffect(() => {
+    const nodes = graphData?.nodes || [];
+    const edges = graphData?.edges || [];
     if (!svgRef.current || !nodes.length) return;
 
     const width = containerRef.current?.clientWidth || 750;

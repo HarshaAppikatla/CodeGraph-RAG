@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import mermaid from 'mermaid';
+import DOMPurify from 'dompurify';
 import { Copy, Check, Download, Compass, Image as ImageIcon } from 'lucide-react';
 
 mermaid.initialize({
@@ -7,7 +8,7 @@ mermaid.initialize({
   suppressErrorRendering: true,
   theme: 'dark',
   htmlLabels: true,
-  securityLevel: 'loose',
+  securityLevel: 'strict',
   flowchart: {
     htmlLabels: true,
     useMaxWidth: true,
@@ -46,6 +47,11 @@ const preprocessChart = (raw) => {
   // 0. Remove markdown code fences if passed
   clean = clean.replace(/^```(?:mermaid)?\s*/i, '').replace(/\s*```$/, '').trim();
 
+  // Strip dangerous script tags, inline event handlers, and javascript schemes to prevent XSS
+  clean = clean.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+  clean = clean.replace(/on\w+\s*=\s*["'][^"']*["']/gi, '');
+  clean = clean.replace(/javascript:\s*/gi, '');
+
   // 1. Normalize linebreaks inside quoted strings to <br/> so text never spills out
   clean = clean.replace(/"([^"]*)"/g, (match, inner) => {
     const replaced = inner.replace(/\\n/g, '<br/>').replace(/\r?\n/g, '<br/>');
@@ -78,7 +84,7 @@ const preprocessChart = (raw) => {
     });
 
     // Square brackets: ID[label] (exclude [[subroutine]], [(cylinder)], [|pipe|])
-    l = l.replace(/(\b[A-Za-z0-9_-]+)\s*\[(?![\[(|/])([^\]\r\n]+)\]/g, (match, id, label) => {
+    l = l.replace(/(\b[A-Za-z0-9_-]+)\s*\[(?![[(|/])([^\]\r\n]+)\]/g, (match, id, label) => {
       if (label.includes('__MERMAID_QUOTE_PH_')) return match;
       if (/[()<>+&/:;,{}]/.test(label)) {
         return `${id}["${label.trim()}"]`;
@@ -114,7 +120,7 @@ const preprocessChart = (raw) => {
     });
 
     // Rounded: ID(label) (exclude ([stadium]), ((circle)))
-    l = l.replace(/(\b[A-Za-z0-9_-]+)\s*\((?![\[(])([^)\r\n]+)\)/g, (match, id, label) => {
+    l = l.replace(/(\b[A-Za-z0-9_-]+)\s*\((?![[(])([^)\r\n]+)\)/g, (match, id, label) => {
       if (label.includes('__MERMAID_QUOTE_PH_')) return match;
       if (/[()<>+&/:;,{}[\]]/.test(label)) {
         return `${id}("${label.trim()}")`;
@@ -165,7 +171,7 @@ const preprocessChart = (raw) => {
         paletteIdx++;
       }
 
-      const nodeRegex = /^\s*([A-Za-z0-9_]+)\s*(\[|\(|\{|\>)/gm;
+      const nodeRegex = /^\s*([A-Za-z0-9_]+)\s*(\[|\(|\{\|>)/gm;
       let nodeMatch;
       const nodeIds = [];
       while ((nodeMatch = nodeRegex.exec(subBody)) !== null) {
@@ -196,17 +202,20 @@ const svgRenderCache = new Map();
 export const MermaidViewer = React.memo(({ chart }) => {
   const cleanChart = chart ? preprocessChart(chart) : '';
   const [svg, setSvg] = useState(() => (cleanChart ? svgRenderCache.get(cleanChart) || '' : ''));
+  const [prevChart, setPrevChart] = useState(cleanChart);
+  if (cleanChart !== prevChart) {
+    setPrevChart(cleanChart);
+    if (svgRenderCache.has(cleanChart)) {
+      setSvg(svgRenderCache.get(cleanChart));
+    }
+  }
+
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!cleanChart) return;
-
-    // If this chart was already rendered and cached, use the cached SVG immediately
-    if (svgRenderCache.has(cleanChart)) {
-      setSvg(svgRenderCache.get(cleanChart));
-      return;
-    }
+    if (svgRenderCache.has(cleanChart)) return;
 
     let isMounted = true;
     const renderChart = async () => {
@@ -224,7 +233,7 @@ export const MermaidViewer = React.memo(({ chart }) => {
           document.querySelectorAll('[id^="dmermaid"], [id^="mermaid-"]').forEach(el => {
             if (el.tagName !== 'svg') el.remove();
           });
-        } catch (_) {}
+        } catch {}
 
         // Secondary fallback pass: aggressive sanitation if first pass threw a syntax notice
         try {
@@ -239,7 +248,7 @@ export const MermaidViewer = React.memo(({ chart }) => {
             setError(null);
             return;
           }
-        } catch (_) {}
+        } catch {}
 
         console.warn('Mermaid rendering notice:', err);
         if (isMounted) {
@@ -518,10 +527,17 @@ export const MermaidViewer = React.memo(({ chart }) => {
         </div>
       </div>
 
-      {/* Rendered Interactive SVG */}
+      {/* Rendered Interactive SVG (sanitized via DOMPurify to eliminate XSS vectors) */}
       <div
         className="p-4 overflow-x-auto flex justify-center"
-        dangerouslySetInnerHTML={{ __html: svg }}
+        dangerouslySetInnerHTML={{
+          __html: DOMPurify.sanitize(svg, {
+            USE_PROFILES: { svg: true, svgFilters: true },
+            ADD_TAGS: ['foreignObject'],
+            FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form'],
+            FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover'],
+          })
+        }}
       />
     </div>
   );

@@ -64,6 +64,10 @@ class Neo4jGraphStore:
             "CREATE CONSTRAINT class_ws_name IF NOT EXISTS FOR (c:Class) REQUIRE (c.ws, c.name) IS UNIQUE",
             "CREATE CONSTRAINT function_ws_name IF NOT EXISTS FOR (fn:Function) REQUIRE (fn.ws, fn.name) IS UNIQUE",
             "CREATE CONSTRAINT import_ws_code IF NOT EXISTS FOR (i:Import) REQUIRE (i.ws, i.code) IS UNIQUE",
+            "CREATE INDEX entity_ws IF NOT EXISTS FOR (e:Entity) ON (e.ws)",
+            "CREATE INDEX function_ws_short IF NOT EXISTS FOR (fn:Function) ON (fn.ws, fn.short_name)",
+            "CREATE INDEX class_ws_short IF NOT EXISTS FOR (c:Class) ON (c.ws, c.short_name)",
+            "CREATE INDEX file_ws IF NOT EXISTS FOR (f:File) ON (f.ws)",
         ]
 
         try:
@@ -113,10 +117,14 @@ class Neo4jGraphStore:
             except Exception:
                 pass
 
-    def ingest_ast(self, filepath: str, ast_data: Dict[str, Any], workspace_id: Optional[str] = None) -> None:
-        """Ingests file AST structures into Neo4j in batch transactions for maximum throughput."""
+    def ingest_ast(self, filepath: str, ast_data: Dict[str, Any], workspace_id: Optional[str] = None) -> bool:
+        """Ingests file AST structures into Neo4j in batch transactions for maximum throughput.
+
+        Returns True only if the writes were successfully committed to Neo4j.
+        Returns False if the driver is unavailable or if an error occurs.
+        """
         if not self.driver or not ast_data:
-            return
+            return False
         ws = workspace_id or "global"
 
         # 1. Prepare Classes payload
@@ -159,6 +167,7 @@ class Neo4jGraphStore:
             {"caller": c["caller"], "callee": c["callee"]}
             for c in ast_data.get("calls", [])
             if c.get("caller") and c.get("callee")
+            and c["caller"] != "unnamed_entity" and c["callee"] != "unnamed_entity"
         ]
 
         # 4. Prepare Imports payload
@@ -170,29 +179,29 @@ class Neo4jGraphStore:
 
         # Cypher Transactions
         cypher_file_imports = """
-        MERGE (f:File {path: $filepath, ws: $ws})
+        MERGE (f:File:Entity {path: $filepath, ws: $ws})
         SET f.updated_at = timestamp()
         WITH f
         UNWIND $imports AS imp_code
-        MERGE (imp:Import {code: imp_code, ws: $ws})
+        MERGE (imp:Import:Entity {code: imp_code, ws: $ws})
         MERGE (f)-[:IMPORTS]->(imp)
         """
 
         cypher_classes = """
         MATCH (f:File {path: $filepath, ws: $ws})
         UNWIND $classes AS cls
-        MERGE (c:Class {name: cls.name, ws: $ws})
+        MERGE (c:Class:Entity {name: cls.name, ws: $ws})
         MERGE (f)-[:CONTAINS_CLASS]->(c)
         WITH c, cls
         UNWIND cls.extends AS parent
-        MERGE (super:Class {name: parent, ws: $ws})
+        MERGE (super:Class:Entity {name: parent, ws: $ws})
         MERGE (c)-[:EXTENDS]->(super)
         """
 
         cypher_functions = """
         MATCH (f:File {path: $filepath, ws: $ws})
         UNWIND $functions AS fn
-        MERGE (func:Function {name: fn.full_name, ws: $ws})
+        MERGE (func:Function:Entity {name: fn.full_name, ws: $ws})
         SET func.short_name = fn.short_name,
             func.type = fn.type,
             func.file = $filepath,
@@ -200,14 +209,14 @@ class Neo4jGraphStore:
         MERGE (f)-[:CONTAINS_FUNCTION]->(func)
         WITH func, fn
         WHERE fn.class_name IS NOT NULL
-        MERGE (c:Class {name: fn.class_name, ws: $ws})
+        MERGE (c:Class:Entity {name: fn.class_name, ws: $ws})
         MERGE (c)-[:HAS_METHOD]->(func)
         """
 
         cypher_calls = """
         UNWIND $calls AS call
-        MERGE (caller:Function {name: call.caller, ws: $ws})
-        MERGE (callee:Function {name: call.callee, ws: $ws})
+        MERGE (caller:Function:Entity {name: call.caller, ws: $ws})
+        MERGE (callee:Function:Entity {name: call.callee, ws: $ws})
         MERGE (caller)-[:CALLS]->(callee)
         """
 
@@ -220,8 +229,10 @@ class Neo4jGraphStore:
                     session.run(cypher_functions, filepath=filepath, functions=functions_payload, ws=ws)
                 if calls_payload:
                     session.run(cypher_calls, calls=calls_payload, ws=ws)
+            return True
         except Exception as e:
             self.log(f"⚠️ Neo4j Ingestion Error for '{filepath}': {e}")
+            return False
 
     def analyze_blast_radius_with_inheritance(
         self, symbol: str, workspace_id: Optional[str] = None, max_hops: int = 3
@@ -246,43 +257,59 @@ class Neo4jGraphStore:
             "message": "Neo4j driver not connected or node not found.",
         }
 
-        if not self.driver:
+        if not self.driver or not workspace_id or not str(workspace_id).strip():
             return default_res
+        clean_ws = str(workspace_id).strip()
 
         safe_hops = min(5, max(1, int(max_hops)))
 
         cypher_query = f"""
-        MATCH (target) WHERE (target.name = $symbol OR target.short_name = $symbol OR target.name ENDS WITH ('.' + $symbol))
-          AND ($ws IS NULL OR target.ws = $ws)
+        MATCH (target:Function|Class {{ws: $ws}})
+        WHERE (target.name = $symbol OR target.short_name = $symbol OR target.name ENDS WITH ('.' + $symbol))
 
-        // 1. Fetch Interface & Class Hierarchy (Upstream & Downstream)
-        OPTIONAL MATCH (target)-[:EXTENDS|IMPLEMENTS*1..2]->(parent)
-        OPTIONAL MATCH (child)-[:EXTENDS|IMPLEMENTS*1..2]->(target)
+        OPTIONAL MATCH (f:File {{ws: $ws}})-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
 
-        // 2. Fetch Callers across all overrides & implementations
-        OPTIONAL MATCH (caller)-[:CALLS*1..{safe_hops}]->(target)
-        OPTIONAL MATCH (child_caller)-[:CALLS*1..{safe_hops}]->(child)
-
-        // 3. Fetch Downstream Callees that target invokes
-        OPTIONAL MATCH (target)-[:CALLS]->(callee)
-
-        // 4. File containing target
-        OPTIONAL MATCH (f:File)-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
+        CALL {{
+            WITH target
+            OPTIONAL MATCH (target)-[:EXTENDS|IMPLEMENTS*1..2]->(parent)
+            RETURN collect(DISTINCT parent) as parents
+        }}
+        CALL {{
+            WITH target
+            OPTIONAL MATCH (child)-[:EXTENDS|IMPLEMENTS*1..2]->(target)
+            RETURN collect(DISTINCT child) as children
+        }}
+        CALL {{
+            WITH target
+            OPTIONAL MATCH (caller:Function {{ws: target.ws}})-[:CALLS*1..{safe_hops}]->(target)
+            RETURN collect(DISTINCT caller) as direct_callers
+        }}
+        CALL {{
+            WITH target
+            OPTIONAL MATCH (child)-[:EXTENDS|IMPLEMENTS*1..2]->(target)
+            OPTIONAL MATCH (child_caller:Function {{ws: target.ws}})-[:CALLS*1..{safe_hops}]->(child)
+            RETURN collect(DISTINCT child_caller) as child_callers
+        }}
+        CALL {{
+            WITH target
+            OPTIONAL MATCH (target)-[:CALLS]->(callee:Function {{ws: target.ws}})
+            RETURN collect(DISTINCT callee)[0..15] as callees
+        }}
 
         RETURN 
             target,
             labels(target) as target_labels,
             f.path as defined_file,
-            collect(DISTINCT parent) as parents,
-            collect(DISTINCT child) as children,
-            collect(DISTINCT caller) as direct_callers,
-            collect(DISTINCT child_caller) as child_callers,
-            collect(DISTINCT callee)[0..15] as callees
+            parents,
+            children,
+            direct_callers,
+            child_callers,
+            callees
         """
 
         try:
             with self.driver.session() as session:
-                result = session.run(cypher_query, symbol=symbol, ws=workspace_id)
+                result = session.run(cypher_query, symbol=symbol, ws=clean_ws)
                 records = list(result)
                 if not records or not records[0]["target"]:
                     default_res["message"] = f"Symbol '{symbol}' not found in Neo4j graph."
@@ -476,37 +503,49 @@ class Neo4jGraphStore:
             "message": "Neo4j driver not connected or node not found.",
         }
 
-        if not self.driver:
+        if not self.driver or not workspace_id or not str(workspace_id).strip():
             return default_res
+        clean_ws = str(workspace_id).strip()
 
         cypher = """
-        MATCH (target) WHERE (target.name = $symbol OR target.short_name = $symbol)
-          AND ($ws IS NULL OR target.ws = $ws)
-        OPTIONAL MATCH (caller:Function)-[:CALLS*1..5]->(target)
-        OPTIONAL MATCH (sub:Class)-[:EXTENDS*1..5]->(target)
-        OPTIONAL MATCH (f:File)-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
+        MATCH (target:Function|Class {ws: $ws})
+        WHERE (target.name = $symbol OR target.short_name = $symbol OR target.name ENDS WITH ('.' + $symbol))
+        OPTIONAL MATCH (f:File {ws: $ws})-[:CONTAINS_FUNCTION|CONTAINS_CLASS]->(target)
+        CALL {
+            WITH target
+            OPTIONAL MATCH (caller:Function {ws: target.ws})-[:CALLS*1..5]->(target)
+            RETURN collect(DISTINCT caller.name) AS direct_and_transitive_callers
+        }
+        CALL {
+            WITH target
+            OPTIONAL MATCH (sub:Class {ws: target.ws})-[:EXTENDS*1..5]->(target)
+            RETURN collect(DISTINCT sub.name) AS child_classes
+        }
         RETURN target.name AS symbol_name, labels(target) AS symbol_type,
-               collect(DISTINCT caller.name) AS direct_and_transitive_callers,
-               collect(DISTINCT sub.name) AS child_classes,
+               direct_and_transitive_callers,
+               child_classes,
                f.path AS defined_in_file
         """
 
         try:
             with self.driver.session() as session:
-                result = session.run(cypher, symbol=target_symbol, ws=workspace_id)
+                result = session.run(cypher, symbol=target_symbol, ws=clean_ws)
                 records = list(result)
 
                 if not records or not records[0]["symbol_name"]:
                     fuzzy_cypher = """
-                    MATCH (fn:Function) WHERE (fn.name ENDS WITH '.' + $symbol OR fn.short_name = $symbol)
-                      AND ($ws IS NULL OR fn.ws = $ws)
-                    OPTIONAL MATCH (caller:Function)-[:CALLS*1..5]->(fn)
-                    OPTIONAL MATCH (f:File)-[:CONTAINS_FUNCTION]->(fn)
+                    MATCH (fn:Function {ws: $ws}) WHERE (fn.name ENDS WITH '.' + $symbol OR fn.short_name = $symbol)
+                    OPTIONAL MATCH (f:File {ws: $ws})-[:CONTAINS_FUNCTION]->(fn)
+                    CALL {
+                        WITH fn
+                        OPTIONAL MATCH (caller:Function {ws: fn.ws})-[:CALLS*1..5]->(fn)
+                        RETURN collect(DISTINCT caller.name) AS direct_and_transitive_callers
+                    }
                     RETURN fn.name AS symbol_name, ['Function'] AS symbol_type,
-                           collect(DISTINCT caller.name) AS direct_and_transitive_callers,
+                           direct_and_transitive_callers,
                            [] AS child_classes, f.path AS defined_in_file
                     """
-                    records = list(session.run(fuzzy_cypher, symbol=target_symbol, ws=workspace_id))
+                    records = list(session.run(fuzzy_cypher, symbol=target_symbol, ws=clean_ws))
 
                 if not records or not records[0]["symbol_name"]:
                     default_res["message"] = f"No graph node found matching '{target_symbol}'."
@@ -534,13 +573,12 @@ class Neo4jGraphStore:
 
     def list_symbols(self, workspace_id: Optional[str] = None, limit: int = 300) -> List[Dict[str, str]]:
         """Distinct class/function names indexed in the Neo4j AST for one workspace, with their file."""
-        if not self.driver:
+        if not self.driver or not workspace_id or not str(workspace_id).strip():
             return []
+        clean_ws = str(workspace_id).strip()
         cypher = """
-        MATCH (n) 
-        WHERE (n.ws = $ws OR $ws IS NULL) 
-          AND (n:Function OR n:Class) 
-          AND n.file IS NOT NULL 
+        MATCH (n:Function|Class {ws: $ws}) 
+        WHERE n.file IS NOT NULL 
           AND NOT n.name STARTS WITH '('
         RETURN DISTINCT n.name as name, n.file as file, head(labels(n)) as type
         ORDER BY n.name 
@@ -548,7 +586,7 @@ class Neo4jGraphStore:
         """
         try:
             with self.driver.session() as session:
-                records = session.run(cypher, ws=workspace_id, limit=limit).data()
+                records = session.run(cypher, ws=clean_ws, limit=limit).data()
                 return [{"name": r["name"], "file": r["file"] or "", "type": r.get("type", "Function")} for r in records]
         except Exception as e:
             self.log(f"⚠️ Neo4j symbol listing error: {e}")
@@ -556,28 +594,49 @@ class Neo4jGraphStore:
 
     def get_file_graph(self, filepath: str, workspace_id: Optional[str] = None) -> Dict[str, Any]:
         """Retrieves structural nodes and edges for a specific file."""
-        if not self.driver:
-            return {"error": "Neo4j driver not connected."}
+        if not self.driver or not workspace_id or not str(workspace_id).strip():
+            return {"error": "Workspace ID is required and Neo4j driver must be connected."}
+        clean_ws = str(workspace_id).strip()
 
         cypher = """
-        MATCH (f:File) WHERE f.path = $filepath AND ($ws IS NULL OR f.ws = $ws)
-        OPTIONAL MATCH (f)-[:CONTAINS_CLASS]->(c:Class)
-        OPTIONAL MATCH (c)-[:HAS_METHOD]->(m:Function)
-        OPTIONAL MATCH (f)-[:CONTAINS_FUNCTION]->(fn:Function)
-        OPTIONAL MATCH (f)-[:IMPORTS]->(imp:Import)
-        OPTIONAL MATCH (caller:Function)-[:CALLS]->(callee:Function)
-        WHERE (caller.file = $filepath OR callee.file = $filepath) AND ($ws IS NULL OR caller.ws = $ws)
+        MATCH (f:File {path: $filepath, ws: $ws})
+        CALL {
+            WITH f
+            OPTIONAL MATCH (f)-[:CONTAINS_CLASS]->(c:Class)
+            RETURN collect(DISTINCT c.name) AS classes
+        }
+        CALL {
+            WITH f
+            OPTIONAL MATCH (f)-[:CONTAINS_CLASS]->(:Class)-[:HAS_METHOD]->(m:Function)
+            RETURN collect(DISTINCT m.name) AS class_methods
+        }
+        CALL {
+            WITH f
+            OPTIONAL MATCH (f)-[:CONTAINS_FUNCTION]->(fn:Function)
+            RETURN collect(DISTINCT fn.name) AS top_functions
+        }
+        CALL {
+            WITH f
+            OPTIONAL MATCH (f)-[:IMPORTS]->(imp:Import)
+            RETURN collect(DISTINCT imp.code) AS imports
+        }
+        CALL {
+            WITH f
+            OPTIONAL MATCH (caller:Function {ws: f.ws})-[:CALLS]->(callee:Function {ws: f.ws})
+            WHERE (caller.file = f.path OR callee.file = f.path)
+            RETURN collect(DISTINCT {caller: caller.name, callee: callee.name}) AS call_edges
+        }
         RETURN f.path AS file_path,
-               collect(DISTINCT c.name) AS classes,
-               collect(DISTINCT fn.name) AS top_functions,
-               collect(DISTINCT m.name) AS class_methods,
-               collect(DISTINCT imp.code) AS imports,
-               collect(DISTINCT {caller: caller.name, callee: callee.name}) AS call_edges
+               classes,
+               top_functions,
+               class_methods,
+               imports,
+               call_edges
         """
 
         try:
             with self.driver.session() as session:
-                records = list(session.run(cypher, filepath=filepath, ws=workspace_id))
+                records = list(session.run(cypher, filepath=filepath, ws=clean_ws))
                 if not records or not records[0]["file_path"]:
                     return {
                         "found": False,
@@ -611,8 +670,9 @@ class Neo4jGraphStore:
         - File containment: [:CONTAINS_CLASS], [:CONTAINS_FUNCTION]
         - File imports: [:IMPORTS]
         """
-        if not self.driver:
-            return {"connected": False, "nodes": [], "edges": [], "message": "Neo4j driver not connected."}
+        if not self.driver or not workspace_id or not str(workspace_id).strip():
+            return {"connected": False, "nodes": [], "edges": [], "message": "Workspace ID is required."}
+        clean_ws = str(workspace_id).strip()
 
         # Stratified query across relationship tiers to ensure a balanced, readable architecture constellation:
         # 1. Inheritance & Interfaces ([:EXTENDS], [:IMPLEMENTS])
@@ -622,8 +682,8 @@ class Neo4jGraphStore:
         # 5. Connected call flows ([:CALLS]) with dummy script tokens (unnamed_entity) filtered out
         cypher = """
         CALL () {
-            MATCH (n)-[r:EXTENDS|IMPLEMENTS]->(m)
-            WHERE ($ws IS NULL OR n.ws = $ws)
+            MATCH (n:Class {ws: $ws})-[r:EXTENDS|IMPLEMENTS]->(m:Class {ws: $ws})
+            WHERE 1=1
               AND n.name <> "unnamed_entity" AND m.name <> "unnamed_entity"
             RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
             LIMIT 25
@@ -632,7 +692,7 @@ class Neo4jGraphStore:
         UNION
         CALL () {
             MATCH (n:File)-[r:CONTAINS_CLASS|CONTAINS_FUNCTION]->(m)
-            WHERE ($ws IS NULL OR m.ws = $ws OR n.ws = $ws)
+            WHERE (m.ws = $ws OR n.ws = $ws)
               AND m.name <> "unnamed_entity" AND NOT m.name STARTS WITH "anon_"
             RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
             LIMIT 60
@@ -641,7 +701,7 @@ class Neo4jGraphStore:
         UNION
         CALL () {
             MATCH (n:Class)-[r:HAS_METHOD]->(m:Function)
-            WHERE ($ws IS NULL OR n.ws = $ws OR m.ws = $ws)
+            WHERE (n.ws = $ws OR m.ws = $ws)
               AND n.name <> "unnamed_entity" AND m.name <> "unnamed_entity"
             RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
             LIMIT 40
@@ -650,7 +710,7 @@ class Neo4jGraphStore:
         UNION
         CALL () {
             MATCH (n:File)-[r:IMPORTS]->(m)
-            WHERE ($ws IS NULL OR n.ws = $ws OR m.ws = $ws)
+            WHERE (n.ws = $ws OR m.ws = $ws)
             RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels
             LIMIT 40
         }
@@ -658,7 +718,7 @@ class Neo4jGraphStore:
         UNION
         CALL () {
             MATCH (n:Function)-[r:CALLS]->(m:Function)
-            WHERE ($ws IS NULL OR n.ws = $ws)
+            WHERE n.ws = $ws
               AND n.name <> "unnamed_entity" AND m.name <> "unnamed_entity"
               AND NOT n.name STARTS WITH "anon_" AND NOT m.name STARTS WITH "anon_"
               AND (n.file IS NOT NULL OR m.file IS NOT NULL)
@@ -671,12 +731,12 @@ class Neo4jGraphStore:
         try:
             with self.driver.session() as session:
                 try:
-                    records = list(session.run(cypher, ws=workspace_id))
+                    records = list(session.run(cypher, ws=clean_ws))
                 except Exception:
                     # Fallback for simpler Neo4j runtimes without subqueries
                     records = list(session.run(
-                        "MATCH (n)-[r]->(m) WHERE ($ws IS NULL OR n.ws = $ws) RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels LIMIT $limit",
-                        ws=workspace_id, limit=limit
+                        "MATCH (n:File|Class|Function|Entity {ws: $ws})-[r]->(m:File|Class|Function|Entity {ws: $ws}) RETURN n, labels(n) as n_labels, r, type(r) as r_type, m, labels(m) as m_labels LIMIT $limit",
+                        ws=clean_ws, limit=limit
                     ))
                 nodes_map = {}
                 edges = []
@@ -748,8 +808,8 @@ class Neo4jGraphStore:
                 if not nodes_map:
                     # Fallback to isolated nodes if no relationships exist
                     fallback_records = list(session.run(
-                        "MATCH (n) WHERE ($ws IS NULL OR n.ws = $ws) RETURN n, labels(n) as n_labels LIMIT $limit",
-                        ws=workspace_id, limit=limit
+                        "MATCH (n:File|Class|Function|Entity {ws: $ws}) RETURN n, labels(n) as n_labels LIMIT $limit",
+                        ws=clean_ws, limit=limit
                     ))
                     for rec in fallback_records:
                         node_n = _extract_node(rec.get("n"), rec.get("n_labels"))
@@ -776,13 +836,25 @@ class Neo4jGraphStore:
             self.log(f"⚠️ get_workspace_architecture_graph failed: {e}")
             return {"connected": False, "nodes": [], "edges": [], "message": f"Architecture query failed: {e}"}
 
+    def count_workspace_nodes(self, workspace_id: str) -> int:
+        """Returns the number of nodes stored for this workspace in Neo4j."""
+        if not self.driver or not workspace_id:
+            return 0
+        try:
+            with self.driver.session() as session:
+                res = session.run("MATCH (n:File|Class|Function|Import|Entity {ws: $ws}) RETURN count(n) as cnt", ws=str(workspace_id).strip()).single()
+                return res["cnt"] if res else 0
+        except Exception as e:
+            self.log(f"⚠️ Graph count check error for {workspace_id}: {e}")
+            return 0
+
     def delete_workspace(self, workspace_id: str) -> int:
         """Permanently deletes all nodes and relationships associated with a workspace from Neo4j."""
         if not self.driver or not workspace_id:
             return 0
         try:
             with self.driver.session() as session:
-                res = session.run("MATCH (n {ws: $ws}) DETACH DELETE n", ws=workspace_id)
+                res = session.run("MATCH (n:File|Class|Function|Import|Entity {ws: $ws}) DETACH DELETE n", ws=workspace_id)
                 summary = res.consume()
                 deleted = summary.counters.nodes_deleted
                 self.log(f"🗑️ Deleted {deleted} Neo4j nodes for workspace '{workspace_id}'")

@@ -1,0 +1,66 @@
+name: CodeGraph CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  backend-test:
+    name: Backend Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx fastapi uvicorn sqlalchemy pydantic-settings passlib bcrypt python-jose python-multipart fastembed sentence-transformers
+
+      - name: Run Pytest Test Suite
+        env:
+          JWT_SECRET: "test-secret-key-at-least-32-characters-long!!"
+          DATABASE_URL: "sqlite:///./test_ci.db"
+        run: |
+          python -m pytest test_tenant_security.py test_blast_radius_resolution.py test_refactor_endpoint.py test_indexing_status.py test_data_loss_and_truncation.py test_security_quota_and_xss.py test_gemini_embeddings.py -v
+
+  frontend-check:
+    name: Frontend Lint & Production Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+
+      - name: Run Oxlint (0 warnings policy)
+        run: npm run lint
+
+      - name: Build Production Assets
+        run: npm run build
+

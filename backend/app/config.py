@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     ENCRYPTION_KEY: Optional[str] = None
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+    MAX_CONCURRENT_INGESTIONS_PER_USER: int = 1
+    MAX_WORKSPACES_PER_USER: int = 25
 
     @property
     def neo4j_user(self) -> str:

@@ -1,40 +1,17 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { api } from './services/api';
-import { ChatMessageContent } from './components/ChatMessageContent';
 import { preFilterProjectZip, filterAndZipFolder, getFilesFromDataTransfer } from './utils/zipFilter';
 import { RefactorDiffViewer } from './components/RefactorDiffViewer';
 import { BlastRadiusGraph } from './components/BlastRadiusGraph';
 import { UnifiedArchitectureGraph } from './components/UnifiedArchitectureGraph';
 import HybridRAGSearch from './components/HybridRAGSearch';
 import KeyVaultModal from './components/KeyVaultModal';
-import DynamicModelSelector from './components/DynamicModelSelector';
-import { INITIAL_WORKSPACES, SYMBOL_GRAPHS, DEMO_REFACTOR_PROMPTS, DEMO_STUDYSYNC_CHAT_FALLBACK, DEMO_STUDYSYNC_DIFF_FOLLOWUP, DEMO_STUDYSYNC_DIFF_TURN1, DEMO_INITIAL_QA_MESSAGES } from './fixtures/mockData';
+import { INITIAL_WORKSPACES, SYMBOL_GRAPHS, DEMO_REFACTOR_PROMPTS, DEMO_STUDYSYNC_DIFF_FOLLOWUP, DEMO_STUDYSYNC_DIFF_TURN1, DEMO_INITIAL_QA_MESSAGES } from './fixtures/mockData';
 import {
   Shield, Key, GitBranch, Cpu, Zap, AlertTriangle, ArrowRight, RefreshCw, Terminal, Sliders,
   Search, Activity, Sparkles, LogOut, Folder, UploadCloud, GitPullRequest, Check, Copy,
-  Plus, X, Lock, ZoomIn, ZoomOut, Maximize2, RotateCcw, Layers, CheckCircle2, Trash2
+  Plus, X, ZoomIn, ZoomOut, Maximize2, RotateCcw, Layers, CheckCircle2, Trash2
 } from 'lucide-react';
-
-
-
-
-
-// Memoized chat bubble: ensures prior messages and their rendered Mermaid SVGs NEVER re-render on typing or new turns
-const ChatMessageBubble = React.memo(({ msg }) => (
-  <div
-    className={`p-4 rounded-2xl max-w-3xl text-xs leading-relaxed space-y-2 ${msg.sender === 'user' ? 'bg-cyan-500/10 border border-cyan-500/30 text-slate-100 ml-auto' : 'bg-slate-900 border border-slate-800 text-slate-300'}`}
-  >
-    <div className="font-bold text-[10px] uppercase font-mono text-cyan-400">
-      {msg.sender === 'user' ? 'Developer' : 'CodeGraph Assistant'}
-    </div>
-    <ChatMessageContent text={msg.text} />
-    {msg.sources && msg.sources.length > 0 && (
-      <div className="pt-2 border-t border-slate-800 text-[10px] font-mono text-slate-400">
-        Sources: {msg.sources.join(', ')}
-      </div>
-    )}
-  </div>
-));
 
 export default function App() {
   // Authentication & Global User State
@@ -48,13 +25,13 @@ export default function App() {
   const [isKeyEncryptedInBackend, setIsKeyEncryptedInBackend] = useState(false);
   const [maskedKeyDisplay, setMaskedKeyDisplay] = useState('');
 
-  const checkBackendKey = async () => {
+  const checkBackendKey = useCallback(async () => {
     try {
       const res = await api.getGeminiKey();
       if (res && res.configured) {
         setIsKeyEncryptedInBackend(true);
         setMaskedKeyDisplay(res.masked_key || '');
-        if (!geminiApiKey) setGeminiApiKey(res.masked_key || 'CONFIGURED');
+        setGeminiApiKey(prev => prev || res.masked_key || 'CONFIGURED');
       } else {
         setIsKeyEncryptedInBackend(false);
         setMaskedKeyDisplay('');
@@ -62,11 +39,29 @@ export default function App() {
     } catch {
       // not logged in yet or offline
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (currentUser) {
-      checkBackendKey();
+      let active = true;
+      (async () => {
+        try {
+          const res = await api.getGeminiKey();
+          if (active && res && res.configured) {
+            setIsKeyEncryptedInBackend(true);
+            setMaskedKeyDisplay(res.masked_key || '');
+            setGeminiApiKey(prev => prev || res.masked_key || 'CONFIGURED');
+          } else if (active) {
+            setIsKeyEncryptedInBackend(false);
+            setMaskedKeyDisplay('');
+          }
+        } catch {
+          // not logged in yet or offline
+        }
+      })();
+      return () => {
+        active = false;
+      };
     }
   }, [currentUser]);
 
@@ -169,7 +164,6 @@ export default function App() {
   };
 
   // AI & QA Assistant State
-  const [qaInput, setQaInput] = useState('');
   const [qaMessages, setQaMessages] = useState([
     {
       sender: 'assistant',
@@ -177,7 +171,6 @@ export default function App() {
       sources: []
     }
   ]);
-  const [isAiThinking, setIsAiThinking] = useState(false);
 
   // Refactor Sandbox State
   const [refactorPrompt, setRefactorPrompt] = useState('');
@@ -263,51 +256,42 @@ export default function App() {
     return () => clearInterval(interval);
   }, [currentScreen, workspaces]);
 
+  const selectedWorkspaceId = selectedWorkspace?.id;
+  const isDemoUser = Boolean(currentUser?.isDemo);
+  const selectedWorkspaceName = selectedWorkspace?.name;
+  const selectedWorkspaceFilesCount = selectedWorkspace?.filesCount;
+  const selectedWorkspaceLanguage = selectedWorkspace?.language;
+  const selectedWorkspaceStatus = selectedWorkspace?.status;
+  const selectedWorkspaceBranch = selectedWorkspace?.branch;
+
   // Dynamic Workspace Symbol and Info Loader
   useEffect(() => {
-    if (!selectedWorkspace?.id) return;
+    if (!selectedWorkspaceId) return;
     let isCanceled = false;
-    const isDemo = Boolean(selectedWorkspace.id.startsWith('ws-') && currentUser?.isDemo);
+    const isDemo = Boolean(selectedWorkspaceId.startsWith('ws-') && isDemoUser);
 
-    // Reset local graph and symbol states on workspace switch to avoid stale rendering
-    setLiveGraphData(null);
-    setGeneratedDiff(null);
-    setRefactorHistory([]);
-
-    if (!isDemo) {
-      setSelectedSymbolKey('');
-      setRefactorPrompt('');
-    } else {
-      setRefactorPrompt(DEMO_REFACTOR_PROMPTS[selectedWorkspace?.id] || '');
-    }
-
-    // Update initial QA chat greeting based on active workspace
-    if (!isDemo) {
-      setQaMessages([
-        {
-          sender: 'assistant',
-          text: `Hello! I have indexed workspace '${selectedWorkspace.name}' (${selectedWorkspace.filesCount || 0} files, language: ${selectedWorkspace.language || 'Code'}). Ask me about its architecture, methods, or classes!`,
-          sources: [selectedWorkspace.name]
-        }
-      ]);
-    } else {
-      setQaMessages(DEMO_INITIAL_QA_MESSAGES);
-    }
-
-    // Sync latest workspace metadata from backend (detects branch/files updates)
-    api.getWorkspace(selectedWorkspace.id)
-      .then(latestWs => {
-        if (isCanceled || !latestWs) return;
-        if (latestWs.status !== selectedWorkspace.status || latestWs.filesCount !== selectedWorkspace.filesCount || latestWs.branch !== selectedWorkspace.branch) {
-          setSelectedWorkspace(latestWs);
-          setWorkspaces(prev => prev.map(w => w.id === latestWs.id ? latestWs : w));
-        }
-      })
-      .catch(console.warn);
-
-    api.listWorkspaceSymbols(selectedWorkspace.id)
+    api.listWorkspaceSymbols(selectedWorkspaceId)
       .then(res => {
         if (isCanceled) return;
+        setLiveGraphData(null);
+        setGeneratedDiff(null);
+        setRefactorHistory([]);
+
+        if (!isDemo) {
+          setSelectedSymbolKey('');
+          setRefactorPrompt('');
+          setQaMessages([
+            {
+              sender: 'assistant',
+              text: `Hello! I have indexed workspace '${selectedWorkspaceName || 'Workspace'}' (${selectedWorkspaceFilesCount || 0} files, language: ${selectedWorkspaceLanguage || 'Code'}). Ask me about its architecture, methods, or classes!`,
+              sources: [selectedWorkspaceName || 'Workspace']
+            }
+          ]);
+        } else {
+          setRefactorPrompt(DEMO_REFACTOR_PROMPTS[selectedWorkspaceId] || '');
+          setQaMessages(DEMO_INITIAL_QA_MESSAGES);
+        }
+
         const syms = res?.symbols || [];
         setWorkspaceSymbols(syms);
         if (syms.length > 0) {
@@ -322,9 +306,23 @@ export default function App() {
         }
       });
 
+    // Sync latest workspace metadata from backend (detects branch/files updates)
+    api.getWorkspace(selectedWorkspaceId)
+      .then(latestWs => {
+        if (isCanceled || !latestWs) return;
+        if (
+          latestWs.status !== selectedWorkspaceStatus ||
+          latestWs.filesCount !== selectedWorkspaceFilesCount ||
+          latestWs.branch !== selectedWorkspaceBranch
+        ) {
+          setSelectedWorkspace(latestWs);
+          setWorkspaces(prev => prev.map(w => w.id === latestWs.id ? latestWs : w));
+        }
+      })
+      .catch(console.warn);
+
     // Fetch unified whole-codebase architecture & relations graph
-    setIsArchLoading(true);
-    api.getWorkspaceArchitectureGraph(selectedWorkspace.id)
+    api.getWorkspaceArchitectureGraph(selectedWorkspaceId)
       .then(arch => {
         if (!isCanceled && arch) {
           setArchitectureGraphData(arch);
@@ -343,10 +341,10 @@ export default function App() {
 
     // If workspace is still indexing, poll until READY
     let pollTimer = null;
-    if (selectedWorkspace.status === 'INDEXING') {
+    if (selectedWorkspaceStatus === 'INDEXING') {
       pollTimer = setInterval(async () => {
         try {
-          const ws = await api.getWorkspace(selectedWorkspace.id);
+          const ws = await api.getWorkspace(selectedWorkspaceId);
           if (ws && ws.status === 'READY') {
             setSelectedWorkspace(ws);
             setWorkspaces(prev => prev.map(w => w.id === ws.id ? ws : w));
@@ -369,16 +367,24 @@ export default function App() {
       isCanceled = true;
       if (pollTimer) clearInterval(pollTimer);
     };
-  }, [selectedWorkspace?.id]);
+  }, [
+    selectedWorkspaceId,
+    isDemoUser,
+    selectedWorkspaceName,
+    selectedWorkspaceFilesCount,
+    selectedWorkspaceLanguage,
+    selectedWorkspaceStatus,
+    selectedWorkspaceBranch,
+  ]);
 
   // Dynamic Graph Impact Loader from Backend
   useEffect(() => {
-    if (!selectedWorkspace || !selectedSymbolKey) return;
+    if (!selectedWorkspaceId || !selectedSymbolKey) return;
     let isCanceled = false;
-    const isDemo = Boolean(selectedWorkspace.id.startsWith('ws-') && currentUser?.isDemo);
+    const isDemo = Boolean(selectedWorkspaceId.startsWith('ws-') && isDemoUser);
     if (!isDemo && selectedSymbolKey === 'generateToken') return;
 
-    api.getSymbolImpact(selectedWorkspace.id, selectedSymbolKey)
+    api.getSymbolImpact(selectedWorkspaceId, selectedSymbolKey)
       .then(data => {
         if (isCanceled) return;
         if (data && data.nodes && data.nodes.length > 0) {
@@ -413,11 +419,11 @@ export default function App() {
     return () => {
       isCanceled = true;
     };
-  }, [selectedSymbolKey, selectedWorkspace?.id, workspaceSymbols]);
+  }, [selectedSymbolKey, selectedWorkspaceId, workspaceSymbols, isDemoUser]);
 
-  const reloadSymbols = useCallback(() => {
-    if (!selectedWorkspace?.id) return;
-    api.getWorkspace(selectedWorkspace.id)
+  const reloadSymbols = () => {
+    if (!selectedWorkspaceId) return;
+    api.getWorkspace(selectedWorkspaceId)
       .then(ws => {
         if (ws) {
           setSelectedWorkspace(ws);
@@ -426,7 +432,7 @@ export default function App() {
       })
       .catch(console.warn);
 
-    api.listWorkspaceSymbols(selectedWorkspace.id)
+    api.listWorkspaceSymbols(selectedWorkspaceId)
       .then(res => {
         const syms = res?.symbols || [];
         setWorkspaceSymbols(syms);
@@ -437,13 +443,13 @@ export default function App() {
       .catch(console.warn);
 
     setIsArchLoading(true);
-    api.getWorkspaceArchitectureGraph(selectedWorkspace.id)
+    api.getWorkspaceArchitectureGraph(selectedWorkspaceId)
       .then(arch => {
         if (arch) setArchitectureGraphData(arch);
       })
       .catch(console.warn)
       .finally(() => setIsArchLoading(false));
-  }, [selectedWorkspace?.id]);
+  };
 
   const handleLoginDemoAccount = async () => {
     setAuthError('');
@@ -572,12 +578,19 @@ export default function App() {
 
         payloadFile = filterResult.cleanFile;
 
-        setIngestLogs(prev => [
-          ...prev,
-          `[${new Date().toLocaleTimeString()}] Raw Upload Size: ${filterResult.originalSizeMB} MB (${filterResult.totalFiles} files detected)`,
-          `[${new Date().toLocaleTimeString()}] ⚡ Auto-Filtered: ${filterResult.skippedFiles} dependency & binary files (node_modules / .venv / build)`,
-          `[${new Date().toLocaleTimeString()}] Clean Source Size Sent to API: ${filterResult.cleanSizeMB} MB (Saved ${filterResult.savedPercent}% bandwidth!)`
-        ]);
+        if (filterResult.bypassed) {
+          setIngestLogs(prev => [
+            ...prev,
+            `[${new Date().toLocaleTimeString()}] Archive Size: ${filterResult.originalSizeMB} MB (> 50 MB safe browser threshold: streaming directly to backend for memory-efficient disk extraction and filtering)`
+          ]);
+        } else {
+          setIngestLogs(prev => [
+            ...prev,
+            `[${new Date().toLocaleTimeString()}] Raw Upload Size: ${filterResult.originalSizeMB} MB (${filterResult.totalFiles} files detected)`,
+            `[${new Date().toLocaleTimeString()}] ⚡ Auto-Filtered: ${filterResult.skippedFiles} dependency & binary files (node_modules / .venv / build)`,
+            `[${new Date().toLocaleTimeString()}] Clean Source Size Sent to API: ${filterResult.cleanSizeMB} MB (Saved ${filterResult.savedPercent}% bandwidth!)`
+          ]);
+        }
 
         setIngestProgress(20);
       } catch (err) {
@@ -629,6 +642,31 @@ export default function App() {
             setWorkspaces(prev => prev.map(w => w.id === statusWs.id ? statusWs : w));
 
             // Fetch real symbols
+            const symRes = await api.listWorkspaceSymbols(statusWs.id).catch(() => null);
+            if (symRes && symRes.symbols && symRes.symbols.length > 0) {
+              setWorkspaceSymbols(symRes.symbols);
+              setSelectedSymbolKey(symRes.symbols[0].name);
+            }
+
+            const archRes = await api.getWorkspaceArchitectureGraph(statusWs.id).catch(() => null);
+            if (archRes) setArchitectureGraphData(archRes);
+
+            setTimeout(() => {
+              setCurrentScreen('APP_WORKSPACE');
+            }, 700);
+          } else if (statusWs.status === 'PARTIAL') {
+            clearInterval(pollInterval);
+            setIngestProgress(100);
+            setIngestStageText(`Partial indexing complete: ${statusWs.filesCount} files processed.`);
+            setIngestLogs(prev => [
+              ...prev,
+              `[${new Date().toLocaleTimeString()}] ⚠️ Partial index: ${statusWs.error || 'One backend failed — some features may be unavailable.'}`,
+              `[${new Date().toLocaleTimeString()}] Entering workspace in degraded mode...`
+            ]);
+            setSelectedWorkspace(statusWs);
+            setWorkspaces(prev => prev.map(w => w.id === statusWs.id ? statusWs : w));
+
+            // Fetch symbols from whichever backend succeeded
             const symRes = await api.listWorkspaceSymbols(statusWs.id).catch(() => null);
             if (symRes && symRes.symbols && symRes.symbols.length > 0) {
               setWorkspaceSymbols(symRes.symbols);
@@ -809,56 +847,13 @@ export default function App() {
     };
   }, [architectureGraphData, isSelectedDemo, selectedWorkspace?.id, workspaceSymbols]);
 
-
-  const handleSendQaQuery = async () => {
-    if (!qaInput.trim()) return;
-    const userMsg = { sender: 'user', text: qaInput };
-    setQaMessages(prev => [...prev, userMsg]);
-    const currentQuery = qaInput;
-    setQaInput('');
-    setIsAiThinking(true);
-
-    try {
-      const historyPayload = qaMessages.slice(-6).map(m => ({ sender: m.sender, text: m.text }));
-      const res = await api.queryRag(selectedWorkspace?.id || '', currentQuery, geminiApiKey, historyPayload);
-      setIsAiThinking(false);
-      if (res && res.answer) {
-        setQaMessages(prev => [
-          ...prev,
-          {
-            sender: 'assistant',
-            text: res.answer,
-            sources: res.sources || ['Qdrant Vector Chunks']
-          }
-        ]);
-        return;
-      }
-    } catch (err) {
-      console.warn("API queryRag error:", err);
-      setIsAiThinking(false);
-      setQaMessages(prev => [
-        ...prev,
-        {
-          sender: 'assistant',
-          text: `⚠️ Request Error: ${err.message}\n\nPlease check your Gemini API key in the top bar.`,
-          sources: []
-        }
-      ]);
-      return;
-    }
-
-    setIsAiThinking(false);
-    const fallbackMsg = isSelectedDemo ? DEMO_STUDYSYNC_CHAT_FALLBACK : {
-      sender: 'assistant',
-      text: `Grounded Architecture Summary for '${selectedWorkspace?.name || 'Workspace'}':\n\n- Indexed Files: ${selectedWorkspace?.filesCount || workspaceSymbols.length} source files (${selectedWorkspace?.language || 'Polyglot'}).\n- Indexed Symbols: ${workspaceSymbols.slice(0, 6).map(s => s.name).join(', ')}${workspaceSymbols.length > 6 ? '...' : ''}\n\nAdd your Gemini API Key on login or set GEMINI_API_KEY in .env to enable multi-turn AI reasoning!`,
-      sources: workspaceSymbols.slice(0, 3).map(s => s.file).filter(Boolean)
-    };
-    setQaMessages(prev => [...prev, fallbackMsg]);
-  };
-
   const handleGenerateRefactor = async (overridePrompt) => {
     const promptToRun = (typeof overridePrompt === 'string' ? overridePrompt : refactorPrompt || '').trim();
     if (!promptToRun) return;
+    if (!selectedWorkspace?.id) {
+      alert('Please select a workspace first.');
+      return;
+    }
 
     setIsGeneratingDiff(true);
     const previousDiffs = generatedDiff?.diffs || [];
@@ -866,7 +861,7 @@ export default function App() {
 
     try {
       const res = await api.generateRefactor(
-        selectedWorkspace?.id || '',
+        selectedWorkspace.id,
         promptToRun,
         keyToSend,
         previousDiffs
@@ -1256,11 +1251,13 @@ export default function App() {
                         <span className={`px-2.5 py-1 rounded-full font-mono text-[10px] font-bold ${
                           ws.status === 'READY'
                             ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+                            : ws.status === 'PARTIAL'
+                            ? 'bg-amber-500/10 border border-amber-500/30 text-amber-400'
                             : ws.status === 'INDEXING'
                             ? 'bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 animate-pulse'
                             : 'bg-rose-500/10 border border-rose-500/20 text-rose-400'
                         }`}>
-                          {ws.status === 'INDEXING' ? '⚡ Indexing...' : ws.status}
+                          {ws.status === 'INDEXING' ? '⚡ Indexing...' : ws.status === 'PARTIAL' ? '⚠️ PARTIAL' : ws.status}
                         </span>
                         {!ws.id.startsWith('ws-') && (
                           <button
@@ -1307,13 +1304,17 @@ export default function App() {
                             <span>Delete</span>
                           </button>
                         )}
-                        {ws.status === 'READY' ? (
+                        {ws.status === 'READY' || ws.status === 'PARTIAL' ? (
                           <button
                             onClick={() => {
                               setSelectedWorkspace(ws);
                               setCurrentScreen('APP_WORKSPACE');
                             }}
-                            className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-xl flex items-center space-x-1.5 transition shadow-lg shadow-cyan-500/20 cursor-pointer"
+                            className={`px-4 py-2 font-bold text-xs rounded-xl flex items-center space-x-1.5 transition shadow-lg cursor-pointer ${
+                              ws.status === 'PARTIAL'
+                                ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-amber-500/20'
+                                : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-cyan-500/20'
+                            }`}
                           >
                             <span>Open Workspace</span>
                             <ArrowRight className="h-3.5 w-3.5" />

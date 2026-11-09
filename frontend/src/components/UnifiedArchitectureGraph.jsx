@@ -1,8 +1,7 @@
-import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import * as d3 from 'd3';
 import {
-  Layers, Filter, Search, ZoomIn, ZoomOut, RefreshCw, Maximize2,
-  GitBranch, Shield, ArrowRight, Activity, FileCode, Check, Eye, EyeOff
+  Layers, Filter, ZoomIn, ZoomOut, RefreshCw, Maximize2, Activity
 } from 'lucide-react';
 
 const RELATION_STYLES = {
@@ -110,8 +109,6 @@ export const UnifiedArchitectureGraph = ({
   const zoomBehaviorRef = useRef(null);
 
   const [selectedNode, setSelectedNode] = useState(null);
-  const [hoveredNode, setHoveredNode] = useState(null);
-  const [searchQuery, setSearchQuery] = useState('');
 
   // Relation Filters (all enabled by default)
   const [activeRelations, setActiveRelations] = useState({
@@ -132,11 +129,10 @@ export const UnifiedArchitectureGraph = ({
     SYMBOL: true
   });
 
-  const rawNodes = graphData?.nodes || [];
-  const rawEdges = graphData?.edges || [];
-
   // Filtered dataset
   const { visibleNodes, visibleEdges } = useMemo(() => {
+    const nodesList = graphData?.nodes || [];
+    const edgesList = graphData?.edges || [];
     const allowedNodeTypes = new Set(
       Object.keys(activeNodeTypes).filter(k => activeNodeTypes[k])
     );
@@ -145,14 +141,14 @@ export const UnifiedArchitectureGraph = ({
     );
 
     const validNodeMap = new Map();
-    rawNodes.forEach(node => {
+    nodesList.forEach(node => {
       const type = node.type || 'SYMBOL';
       if (allowedNodeTypes.has(type)) {
         validNodeMap.set(node.id, node);
       }
     });
 
-    const validEdges = rawEdges.filter(edge => {
+    const validEdges = edgesList.filter(edge => {
       const relType = edge.relationType || (edge.label?.replace(/\[:|\]/g, '')) || 'RELATES';
       return (
         allowedRelations.has(relType) &&
@@ -165,7 +161,7 @@ export const UnifiedArchitectureGraph = ({
       visibleNodes: Array.from(validNodeMap.values()),
       visibleEdges: validEdges
     };
-  }, [rawNodes, rawEdges, activeRelations, activeNodeTypes]);
+  }, [graphData?.nodes, graphData?.edges, activeRelations, activeNodeTypes]);
 
   // Quick Presets
   const applyPreset = (preset) => {
@@ -429,24 +425,27 @@ export const UnifiedArchitectureGraph = ({
   // Compute connections of the selected node
   const selectedNodeRelations = useMemo(() => {
     if (!selectedNode) return { incoming: [], outgoing: [] };
-    const incoming = rawEdges
+    const nodesList = graphData?.nodes || [];
+    const edgesList = graphData?.edges || [];
+
+    const incoming = edgesList
       .filter(e => e.to === selectedNode.id)
       .map(e => ({
-        fromNode: rawNodes.find(n => n.id === e.from) || { label: e.from, type: 'UNKNOWN' },
+        fromNode: nodesList.find(n => n.id === e.from) || { label: e.from, type: 'UNKNOWN' },
         label: e.label,
         type: e.relationType
       }));
 
-    const outgoing = rawEdges
+    const outgoing = edgesList
       .filter(e => e.from === selectedNode.id)
       .map(e => ({
-        toNode: rawNodes.find(n => n.id === e.to) || { label: e.to, type: 'UNKNOWN' },
+        toNode: nodesList.find(n => n.id === e.to) || { label: e.to, type: 'UNKNOWN' },
         label: e.label,
         type: e.relationType
       }));
 
     return { incoming, outgoing };
-  }, [selectedNode, rawNodes, rawEdges]);
+  }, [selectedNode, graphData?.nodes, graphData?.edges]);
 
   return (
     <div ref={containerRef} className="flex-1 flex flex-col bg-slate-950 overflow-hidden relative">

@@ -3,26 +3,53 @@ import sys
 import atexit
 from typing import List, Dict, Any, Tuple, Optional
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import (
+    Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue,
+    HnswConfigDiff, OptimizersConfigDiff, SearchParams
+)
 from backend.app.config import settings
 
 DEFAULT_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_GEMINI_EMBED_MODEL = "text-embedding-004"
+DEFAULT_GEMINI_DIMENSION = 3072
 
 
 class CodeVectorStore:
-    """Manages vector storage and code embeddings using Qdrant and SentenceTransformers."""
+    """Manages vector storage and code embeddings using Qdrant with local FastEmbed/SentenceTransformers (384D) or Google Gemini embeddings (3072D)."""
 
     def __init__(
         self,
         collection_name: str = "code_chunks",
         qdrant_path: str = "./qdrant_data",
-        model_name: str = DEFAULT_EMBED_MODEL,
+        model_name: Optional[str] = None,
+        provider: Optional[str] = None,
+        gemini_api_key: Optional[str] = None,
+        vector_size: Optional[int] = None,
     ):
         self.collection_name = collection_name
         self.qdrant_path = qdrant_path
-        self.model_name = model_name
-        self.vector_size = 384
+
+        env_provider = os.getenv("EMBEDDING_PROVIDER", "").strip().lower()
+        chosen_provider = (provider or env_provider or "").lower()
+
+        if chosen_provider == "gemini" or (model_name and ("gemini" in model_name.lower() or "text-embedding" in model_name.lower())):
+            self.provider = "gemini"
+            self.model_name = model_name or os.getenv("GEMINI_EMBEDDING_MODEL") or DEFAULT_GEMINI_EMBED_MODEL
+            self.vector_size = vector_size or int(os.getenv("GEMINI_EMBEDDING_DIMENSION", str(DEFAULT_GEMINI_DIMENSION)))
+        else:
+            self.provider = "local"
+            self.model_name = model_name or os.getenv("EMBEDDING_MODEL") or DEFAULT_EMBED_MODEL
+            self.vector_size = vector_size or 384
+
+        self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY") or getattr(settings, "GEMINI_API_KEY", None)
+        self._gemini_client = None
         self._model = None
+        # Tracks whether at least one real (non-zero) embedding was produced during this session.
+        # Remains False until generate_embeddings_batch successfully returns non-zero vectors.
+        self._embedding_ok: bool = False
+
+        if self.provider == "gemini":
+            self._init_gemini_client()
 
         # 1. Initialize Qdrant Client (Cloud or local embedded storage)
         qdrant_host = os.getenv("QDRANT_HOST") or getattr(settings, "QDRANT_HOST", None)
@@ -55,6 +82,28 @@ class CodeVectorStore:
 
         # 2. Bootstrap Collection
         self._ensure_collection()
+
+    @property
+    def embedding_ok(self) -> bool:
+        """Returns True when the embedding model loaded successfully and produced real vectors."""
+        return self._embedding_ok
+
+    def _init_gemini_client(self) -> None:
+        """Initializes Google GenAI client for cloud embeddings."""
+        key = self.gemini_api_key or os.getenv("GEMINI_API_KEY") or getattr(settings, "GEMINI_API_KEY", None)
+        if key:
+            try:
+                from google import genai
+                self._gemini_client = genai.Client(api_key=key)
+                self.log(
+                    f"✅ Initialized Google GenAI embedding client "
+                    f"(model: '{self.model_name}', dims: {self.vector_size})."
+                )
+            except Exception as e:
+                self.log(f"⚠️ Failed to initialize Google GenAI embedding client: {e}")
+                self._gemini_client = None
+        else:
+            self.log("⚠️ No GEMINI_API_KEY available for Gemini embeddings.")
 
     @property
     def model(self):
@@ -123,6 +172,15 @@ class CodeVectorStore:
                 self.qdrant.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
+                    hnsw_config=HnswConfigDiff(
+                        m=16,
+                        ef_construct=100,
+                        full_scan_threshold=100,
+                        payload_m=16,
+                    ),
+                    optimizers_config=OptimizersConfigDiff(
+                        indexing_threshold=100,
+                    ),
                 )
             try:
                 self.qdrant.create_payload_index(
@@ -143,6 +201,15 @@ class CodeVectorStore:
             self.qdrant.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
+                hnsw_config=HnswConfigDiff(
+                    m=16,
+                    ef_construct=100,
+                    full_scan_threshold=100,
+                    payload_m=16,
+                ),
+                optimizers_config=OptimizersConfigDiff(
+                    indexing_threshold=100,
+                ),
             )
             try:
                 self.qdrant.create_payload_index(
@@ -157,40 +224,112 @@ class CodeVectorStore:
             self.log(f"⚠️ Error resetting collection: {e}")
 
     def generate_embedding(self, text: str) -> List[float]:
-        """Generates a dense vector embedding using FastEmbed (or SentenceTransformer)."""
+        """Generates a dense vector embedding using Gemini (cloud) or FastEmbed / SentenceTransformer (local).
+
+        Returns an empty list when the text is empty or the model fails to load,
+        preventing zero-vectors from being stored or searched.
+        """
         if not text or not text.strip():
-            return [0.0] * self.vector_size
+            return []
+
+        if self.provider == "gemini":
+            if not self._gemini_client:
+                self._init_gemini_client()
+            if not self._gemini_client:
+                return []
+            try:
+                from google.genai import types
+                config = types.EmbedContentConfig(output_dimensionality=self.vector_size)
+                response = self._gemini_client.models.embed_content(
+                    model=self.model_name,
+                    contents=text,
+                    config=config,
+                )
+                if response and response.embeddings:
+                    vec = response.embeddings[0].values
+                    if vec and not all(v == 0.0 for v in vec):
+                        self._embedding_ok = True
+                        return list(vec)
+                return []
+            except Exception as e:
+                self.log(f"⚠️ Gemini embedding generation error: {e}")
+                return []
+
         embedder = self.model
         if not embedder:
-            return [0.0] * self.vector_size
+            return []
         try:
             if hasattr(embedder, "embed"):
                 vectors = list(embedder.embed([text]))
-                return vectors[0].tolist() if vectors else [0.0] * self.vector_size
+                if vectors:
+                    vec = vectors[0].tolist()
+                    if not all(v == 0.0 for v in vec):
+                        self._embedding_ok = True
+                    return vec
+                return []
             else:
                 vector = embedder.encode(text, convert_to_numpy=True)
-                return vector.tolist()
+                vec = vector.tolist()
+                if not all(v == 0.0 for v in vec):
+                    self._embedding_ok = True
+                return vec
         except Exception as e:
             self.log(f"⚠️ Embedding generation error: {e}")
-            return [0.0] * self.vector_size
+            return []
 
     def generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
-        """Generates dense vector embeddings for a list of text snippets in batch."""
+        """Generates dense vector embeddings for a list of text snippets in batch.
+
+        Returns an empty list when the embedding model is unavailable so callers
+        can distinguish a model failure from a legitimately-empty input list and
+        avoid storing zero-vectors that would pollute search results.
+        """
         if not texts:
             return []
+
+        if self.provider == "gemini":
+            if not self._gemini_client:
+                self._init_gemini_client()
+            if not self._gemini_client:
+                self.log("⚠️ Gemini client unavailable; skipping batch (zero vectors will NOT be stored).")
+                return []
+            try:
+                from google.genai import types
+                config = types.EmbedContentConfig(output_dimensionality=self.vector_size)
+                response = self._gemini_client.models.embed_content(
+                    model=self.model_name,
+                    contents=texts,
+                    config=config,
+                )
+                if response and response.embeddings:
+                    result = [list(emb.values) for emb in response.embeddings]
+                    if result and any(not all(v == 0.0 for v in vec) for vec in result):
+                        self._embedding_ok = True
+                    return result
+                return []
+            except Exception as e:
+                self.log(f"⚠️ Gemini batch embedding generation error: {e}")
+                return []
+
         embedder = self.model
         if not embedder:
-            return [[0.0] * self.vector_size for _ in texts]
+            # Model failed to load — signal failure to callers rather than storing zero-vectors
+            self.log("⚠️ Embedding model unavailable; skipping batch (zero vectors will NOT be stored).")
+            return []
         try:
             if hasattr(embedder, "embed"):
                 vectors = list(embedder.embed(texts, batch_size=4))
-                return [v.tolist() for v in vectors]
+                result = [v.tolist() for v in vectors]
             else:
                 vectors = embedder.encode(texts, convert_to_numpy=True, batch_size=4, show_progress_bar=False)
-                return vectors.tolist()
+                result = vectors.tolist()
+            # Mark that we produced real embeddings at least once this session
+            if result and any(not all(v == 0.0 for v in vec) for vec in result):
+                self._embedding_ok = True
+            return result
         except Exception as e:
             self.log(f"⚠️ Batch embedding generation error: {e}")
-            return [[0.0] * self.vector_size for _ in texts]
+            return []
         finally:
             import gc
             gc.collect()
@@ -198,13 +337,11 @@ class CodeVectorStore:
     def upsert_code_snippet(self, doc_id: int, code_snippet: str, metadata: Dict[str, Any]) -> bool:
         """Embeds a single code snippet and stores it in Qdrant."""
         vector = self.generate_embedding(code_snippet)
-        if not vector:
+        if not vector or all(v == 0.0 for v in vector):
             return False
 
         payload = {
             "snippet": code_snippet,
-            "code": code_snippet,
-            "content": code_snippet,
             **metadata,
         }
 
@@ -238,12 +375,15 @@ class CodeVectorStore:
                 if not vectors or len(vectors) != len(chunk_items):
                     continue
 
+                # Never store zero vectors into Qdrant
+                if any(all(v == 0.0 for v in vec) for vec in vectors):
+                    self.log(f"⚠️ Zero-vectors detected in batch chunk {i}; skipping upsert.")
+                    continue
+
                 points = []
                 for item, vector in zip(chunk_items, vectors):
                     payload = {
                         "snippet": item["code_snippet"],
-                        "code": item["code_snippet"],
-                        "content": item["code_snippet"],
                         **item.get("metadata", {}),
                     }
                     points.append(PointStruct(id=item["doc_id"], vector=vector, payload=payload))
@@ -266,16 +406,18 @@ class CodeVectorStore:
         """Searches Qdrant for code snippets semantically similar to the query.
 
         When workspace_id is given, only chunks indexed for that workspace are returned.
+        Uses HNSW graph traversal instead of brute-force scan.
         """
         query_vector = self.generate_embedding(query)
-        if not query_vector:
+        if not query_vector or all(v == 0.0 for v in query_vector):
             return []
 
-        query_filter = None
-        if workspace_id:
-            query_filter = Filter(
-                must=[FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id))]
-            )
+        # Always apply the workspace filter to guarantee tenant isolation and prevent cross-workspace leaks
+        clean_ws = str(workspace_id).strip() if workspace_id else ""
+        query_filter = Filter(
+            must=[FieldCondition(key="workspace_id", match=MatchValue(value=clean_ws))]
+        )
+        search_params = SearchParams(hnsw_ef=64, exact=False)
 
         try:
             if hasattr(self.qdrant, "query_points"):
@@ -283,6 +425,7 @@ class CodeVectorStore:
                     collection_name=self.collection_name,
                     query=query_vector,
                     query_filter=query_filter,
+                    search_params=search_params,
                     limit=limit,
                 )
                 points = response.points
@@ -291,6 +434,7 @@ class CodeVectorStore:
                     collection_name=self.collection_name,
                     query_vector=query_vector,
                     query_filter=query_filter,
+                    search_params=search_params,
                     limit=limit,
                 )
                 points = response
@@ -299,6 +443,11 @@ class CodeVectorStore:
             for point in points:
                 payload = dict(getattr(point, "payload", {}) or {})
                 payload["score"] = getattr(point, "score", 0.0)
+                # Populate backward-compatibility aliases in memory without duplicating in storage
+                snippet_text = payload.get("snippet") or payload.get("code") or payload.get("content") or ""
+                payload["snippet"] = snippet_text
+                payload["code"] = snippet_text
+                payload["content"] = snippet_text
                 results.append(payload)
             return results
         except Exception as e:
@@ -334,6 +483,18 @@ class CodeVectorStore:
             self.log(f"⚠️ Qdrant symbol listing notice: {e}")
         return [{"name": n, "file": f} for n, f in sorted(seen.items())][:limit]
 
+    def count_workspace_vectors(self, workspace_id: str) -> int:
+        """Returns the number of vector points stored in Qdrant for this workspace."""
+        if not workspace_id:
+            return 0
+        try:
+            flt = Filter(must=[FieldCondition(key="workspace_id", match=MatchValue(value=str(workspace_id).strip()))])
+            res = self.qdrant.count(collection_name=self.collection_name, count_filter=flt, exact=True)
+            return getattr(res, "count", 0)
+        except Exception as e:
+            self.log(f"⚠️ Vector count check error for {workspace_id}: {e}")
+            return 0
+
     def delete_workspace(self, workspace_id: str) -> bool:
         """Deletes all vector embeddings associated with a workspace from Qdrant."""
         if not workspace_id:
@@ -348,4 +509,4 @@ class CodeVectorStore:
             return True
         except Exception as e:
             self.log(f"⚠️ Failed to delete Qdrant points for workspace '{workspace_id}': {e}")
-            return False
+            raise

@@ -11,7 +11,7 @@ const markdownComponents = {
     // Flatten <pre> so code/mermaid components control their own container
     return <>{children}</>;
   },
-  code({ node, className, children, ...props }) {
+  code({ className, children }) {
     const match = /language-(\w+)/.exec(className || '');
     const lang = match ? match[1] : '';
     const codeContent = String(children).replace(/\n$/, '');
