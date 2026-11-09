@@ -6,3 +6,4 @@ python-dotenv
 ragas
 bcrypt>=4.0.0,<4.1.0
 passlib>=1.7.4
+email-validator>=2.0.0
