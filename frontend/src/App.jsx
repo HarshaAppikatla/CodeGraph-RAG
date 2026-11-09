@@ -4,6 +4,7 @@ import { preFilterProjectZip, filterAndZipFolder, getFilesFromDataTransfer } fro
 import { RefactorDiffViewer } from './components/RefactorDiffViewer';
 import { BlastRadiusGraph } from './components/BlastRadiusGraph';
 import { UnifiedArchitectureGraph } from './components/UnifiedArchitectureGraph';
+import ErrorBoundary from './components/ErrorBoundary';
 import HybridRAGSearch from './components/HybridRAGSearch';
 import KeyVaultModal from './components/KeyVaultModal';
 import { INITIAL_WORKSPACES, SYMBOL_GRAPHS, DEMO_REFACTOR_PROMPTS, DEMO_STUDYSYNC_DIFF_FOLLOWUP, DEMO_STUDYSYNC_DIFF_TURN1, DEMO_INITIAL_QA_MESSAGES } from './fixtures/mockData';
@@ -1696,15 +1697,21 @@ export default function App() {
               </div>
 
               {graphScope === 'ARCHITECTURE' ? (
-                <UnifiedArchitectureGraph
-                  graphData={architectureGraphData}
-                  isLoading={isArchLoading}
-                  onRefresh={reloadSymbols}
-                  onFocusSymbol={(symName) => {
-                    setSelectedSymbolKey(symName);
-                    setGraphScope('SYMBOL');
-                  }}
-                />
+                <ErrorBoundary
+                  title="Architecture Graph Notice"
+                  description="An issue occurred while rendering the architecture graph. You can retry or switch to the Symbol Blast Radius view."
+                  onReset={reloadSymbols}
+                >
+                  <UnifiedArchitectureGraph
+                    graphData={architectureGraphData}
+                    isLoading={isArchLoading}
+                    onRefresh={reloadSymbols}
+                    onFocusSymbol={(symName) => {
+                      setSelectedSymbolKey(symName);
+                      setGraphScope('SYMBOL');
+                    }}
+                  />
+                </ErrorBoundary>
               ) : (
                 <div className="flex-1 flex overflow-hidden">
                   {/* Symbol Selector Sidebar */}
@@ -2461,16 +2468,21 @@ export default function App() {
 
           {/* TAB 4: HYBRID RAG QA SEARCH */}
           {activeTab === 'QA' && (
-            <HybridRAGSearch
-              workspace={selectedWorkspace}
-              geminiApiKey={geminiApiKey}
-              onSaveGeminiKey={handleSaveApiKey}
-              onDeleteGeminiKey={() => handleSaveApiKey('')}
-              isKeyEncryptedInBackend={isKeyEncryptedInBackend}
-              maskedKeyDisplay={maskedKeyDisplay}
-              initialMessages={qaMessages}
-              workspaceSymbols={workspaceSymbols}
-            />
+            <ErrorBoundary
+              title="AI Search & Chat Notice"
+              description="Chat assistant temporarily unavailable. Click retry below."
+            >
+              <HybridRAGSearch
+                workspace={selectedWorkspace}
+                geminiApiKey={geminiApiKey}
+                onSaveGeminiKey={handleSaveApiKey}
+                onDeleteGeminiKey={() => handleSaveApiKey('')}
+                isKeyEncryptedInBackend={isKeyEncryptedInBackend}
+                maskedKeyDisplay={maskedKeyDisplay}
+                initialMessages={qaMessages}
+                workspaceSymbols={workspaceSymbols}
+              />
+            </ErrorBoundary>
           )}
 
           {/* TAB 5: MCP TOOLING HUB */}

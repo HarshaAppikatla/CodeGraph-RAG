@@ -109,6 +109,7 @@ export const UnifiedArchitectureGraph = ({
   const zoomBehaviorRef = useRef(null);
 
   const [selectedNode, setSelectedNode] = useState(null);
+  const rawEdges = graphData?.edges || [];
 
   // Relation Filters (all enabled by default)
   const [activeRelations, setActiveRelations] = useState({

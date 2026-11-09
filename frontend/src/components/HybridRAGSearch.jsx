@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   Key, 
   Sparkles, 
@@ -105,32 +105,26 @@ export default function HybridRAGSearch({
 
   const [keysStatus, setKeysStatus] = useState({});
 
+  const refreshKeysStatus = useCallback(async () => {
+    try {
+      const res = await api.getKeysStatus();
+      if (res) {
+        setKeysStatus(res.status || res);
+      }
+    } catch {}
+  }, []);
+
   useEffect(() => {
     let active = true;
-    (async () => {
+    const fetchStatus = async () => {
       try {
         const res = await api.getKeysStatus();
         if (active && res) {
           setKeysStatus(res.status || res);
         }
       } catch {}
-    })();
-    return () => {
-      active = false;
     };
-  }, []);
-
-  // Sync gemini key changes to backend status
-  useEffect(() => {
-    let active = true;
-    if (geminiApiKey) {
-      (async () => {
-        try {
-          const res = await api.getKeysStatus();
-          if (active && res) setKeysStatus(res.status || res);
-        } catch {}
-      })();
-    }
+    fetchStatus();
     return () => {
       active = false;
     };
