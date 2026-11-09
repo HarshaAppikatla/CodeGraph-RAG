@@ -377,12 +377,13 @@ export const UnifiedArchitectureGraph = ({
       .attr('font-weight', '600');
 
     // Node Interaction Handlers
+    node.append('title').text(d => `${d.type}: ${d.label}\nFile: ${d.file || 'N/A'}`);
+
     node.on('click', (event, d) => {
       setSelectedNode(d);
     });
 
     node.on('mouseenter', (event, d) => {
-      setHoveredNode(d);
       // Highlight 1-hop neighborhood
       const neighborIds = new Set();
       neighborIds.add(d.id);
@@ -397,7 +398,6 @@ export const UnifiedArchitectureGraph = ({
     });
 
     node.on('mouseleave', () => {
-      setHoveredNode(null);
       node.attr('opacity', 1);
       link.attr('opacity', 0.85);
       edgeLabelGroup.attr('opacity', 1);
