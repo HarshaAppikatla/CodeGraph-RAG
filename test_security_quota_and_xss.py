@@ -57,25 +57,28 @@ def test_top_k_enforces_strict_cap():
 
 def test_rag_rate_limiting():
     """Requests exceeding 45/minute to /rag/query must receive HTTP 429 Too Many Requests."""
-    # Reset limiter for test IP
     test_key = "ip:testclient"
     rag_rate_limiter.records[test_key] = []
 
-    # Send 45 requests (should succeed)
-    for _ in range(45):
-        assert rag_rate_limiter.check(test_key) is True
+    try:
+        # Send 45 requests (should succeed)
+        for _ in range(45):
+            assert rag_rate_limiter.check(test_key) is True
 
-    # 46th request must be rejected by the limiter
-    assert rag_rate_limiter.check(test_key) is False
+        # 46th request must be rejected by the limiter
+        assert rag_rate_limiter.check(test_key) is False
 
-    # Calling the endpoint when rate limited must return 429
-    with patch.object(rag_rate_limiter, "check", return_value=False):
-        res = client.post(
-            "/api/rag/query",
-            json={"workspace_id": "ws-study-sync", "query": "test rate limit"}
-        )
-        assert res.status_code == 429, f"Expected 429 Too Many Requests, got {res.status_code}"
-        assert "Rate limit exceeded" in res.json()["detail"]
+        # Calling the endpoint when rate limited must return 429
+        with patch.object(rag_rate_limiter, "check", return_value=False):
+            res = client.post(
+                "/api/rag/query",
+                json={"workspace_id": "ws-study-sync", "query": "test rate limit"}
+            )
+            assert res.status_code == 429, f"Expected 429 Too Many Requests, got {res.status_code}"
+            assert "Rate limit exceeded" in res.json()["detail"]
+    finally:
+        # Clean up records so subsequent tests are not throttled
+        rag_rate_limiter.records[test_key] = []
 
 
 def test_mermaid_viewer_security_configuration():
