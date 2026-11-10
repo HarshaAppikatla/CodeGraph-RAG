@@ -1914,11 +1914,16 @@ export default function App() {
                   </div>
                 ) : graphVisualMode === 'force-d3' ? (
                   <div className="flex-1 p-4 relative flex flex-col justify-between overflow-y-auto space-y-4">
-                    <BlastRadiusGraph
-                      graphData={activeGraph}
-                      onSelectNode={(id) => setSelectedNodeId(id)}
-                      selectedNodeId={selectedNodeId}
-                    />
+                    <ErrorBoundary
+                      title="Blast Radius Visualizer Notice"
+                      description="An issue occurred while rendering this symbol blast radius graph. Try selecting another symbol or retry below."
+                    >
+                      <BlastRadiusGraph
+                        graphData={activeGraph}
+                        onSelectNode={(id) => setSelectedNodeId(id)}
+                        selectedNodeId={selectedNodeId}
+                      />
+                    </ErrorBoundary>
 
                     {/* Code Snippet Preview Box */}
                     <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 font-mono text-xs shadow-xl">

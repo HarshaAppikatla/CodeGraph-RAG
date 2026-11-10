@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import * as d3 from 'd3';
 import { ZoomIn, ZoomOut, RefreshCw, Layers, ShieldAlert } from 'lucide-react';
 
@@ -13,6 +13,9 @@ export const BlastRadiusGraph = ({ graphData, onSelectNode, selectedNodeId }) =>
     riskScore = 'N/A',
     riskLevel = 'LOW'
   } = graphData || {};
+
+  const nodes = useMemo(() => graphData?.nodes || [], [graphData?.nodes]);
+  const edges = useMemo(() => graphData?.edges || [], [graphData?.edges]);
 
   const handleZoomIn = () => {
     if (svgRef.current && zoomBehaviorRef.current) {
@@ -33,8 +36,6 @@ export const BlastRadiusGraph = ({ graphData, onSelectNode, selectedNodeId }) =>
   };
 
   useEffect(() => {
-    const nodes = graphData?.nodes || [];
-    const edges = graphData?.edges || [];
     if (!svgRef.current || !nodes.length) return;
 
     const width = containerRef.current?.clientWidth || 750;
@@ -314,7 +315,7 @@ export const BlastRadiusGraph = ({ graphData, onSelectNode, selectedNodeId }) =>
     });
 
     return () => simulation.stop();
-  }, [graphData, selectedNodeId, onSelectNode]);
+  }, [nodes, edges, selectedNodeId, onSelectNode]);
 
   const riskBadgeClass =
     riskLevel === 'HIGH' || (typeof riskScore === 'string' && parseFloat(riskScore) >= 6.5)
