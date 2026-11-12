@@ -273,209 +273,239 @@ export const MermaidViewer = React.memo(({ chart }) => {
     }
   };
 
+  // Prepares a fully valid, standalone, portable SVG string with pure SVG text & styling
+  const prepareExportableSvg = () => {
+    if (!svg) return null;
+
+    // 1. Repair unclosed void HTML tags from Mermaid HTML labels before XML DOM parsing
+    // This eliminates fatal XML parsererror ("Unexpected closing tag: </p> != <br>") that truncated nodes
+    const wellFormedSvg = svg
+      .replace(/<br>/gi, '<br/>')
+      .replace(/<hr>/gi, '<hr/>')
+      .replace(/<img\b([^>]*)(?<!\/)>/gi, '<img$1/>')
+      .replace(/<input\b([^>]*)(?<!\/)>/gi, '<input$1/>');
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(wellFormedSvg, 'image/svg+xml');
+    const svgEl = doc.querySelector('svg');
+    if (!svgEl) return null;
+
+    // Determine true diagram bounds from viewBox or attributes
+    const rawWidth = svgEl.getAttribute('width');
+    const rawHeight = svgEl.getAttribute('height');
+    const viewBox = svgEl.getAttribute('viewBox');
+
+    let width = 0;
+    let height = 0;
+
+    if (viewBox) {
+      const parts = viewBox.trim().split(/[\s,]+/).map(Number);
+      if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+        width = parts[2];
+        height = parts[3];
+      }
+    }
+
+    if (!width || !height) {
+      if (rawWidth && !rawWidth.includes('%')) width = parseFloat(rawWidth);
+      if (rawHeight && !rawHeight.includes('%')) height = parseFloat(rawHeight);
+    }
+
+    width = width || 1200;
+    height = height || 800;
+
+    // Explicitly set width & height attributes on the SVG clone so it renders at full resolution
+    svgEl.setAttribute('width', String(width));
+    svgEl.setAttribute('height', String(height));
+    svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    svgEl.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+
+    // Strip any external @import rules in <style> to prevent CORS canvas tainting
+    const styles = svgEl.querySelectorAll('style');
+    styles.forEach(s => {
+      if (s.textContent) {
+        s.textContent = s.textContent.replace(/@import\s+[^;]+;/gi, '');
+      }
+    });
+
+    // Dark slate background for clean contrast when viewed standalone in browser or image viewers
+    const bgRect = doc.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    bgRect.setAttribute('width', '100%');
+    bgRect.setAttribute('height', '100%');
+    bgRect.setAttribute('fill', '#020617');
+    svgEl.insertBefore(bgRect, svgEl.firstChild);
+
+    // HTML entity decoder helper
+    const decodeHtmlEntities = (str) => {
+      return str
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'");
+    };
+
+    // Smart line breaker so multi-line text stays neatly inside node boundaries
+    const splitIntoFittingLines = (rawLines, boxWidth, fontSize) => {
+      const approxCharWidth = fontSize * 0.58;
+      const maxChars = Math.max(12, Math.floor((boxWidth - 10) / approxCharWidth));
+      const finalLines = [];
+
+      for (const line of rawLines) {
+        const decoded = decodeHtmlEntities(line).trim();
+        if (!decoded) continue;
+
+        if (decoded.length <= maxChars) {
+          finalLines.push(decoded);
+          continue;
+        }
+
+        // Break gracefully on spaces, commas, or slash separators
+        const tokens = decoded.split(/(?<=[,\s]|\s\/\s)/g);
+        let current = '';
+        for (const token of tokens) {
+          if (!current) {
+            current = token;
+          } else if ((current + token).length <= maxChars) {
+            current += token;
+          } else {
+            if (current.trim()) finalLines.push(current.trim());
+            current = token;
+          }
+        }
+        if (current.trim()) finalLines.push(current.trim());
+      }
+
+      return finalLines;
+    };
+
+    // Convert all foreignObject elements to native SVG <text>/<tspan> elements
+    // Eliminates the Chromium 'tainted canvas' SecurityError while guaranteeing 100% of node boxes, fills, and labels
+    const foreignObjects = Array.from(svgEl.querySelectorAll('foreignObject'));
+    foreignObjects.forEach(fo => {
+      const x = parseFloat(fo.getAttribute('x') || 0);
+      const y = parseFloat(fo.getAttribute('y') || 0);
+      const w = parseFloat(fo.getAttribute('width') || 0);
+      const h = parseFloat(fo.getAttribute('height') || 0);
+
+      // Convert <br>, <p>, <div> to newlines to extract lines cleanly
+      const clone = fo.cloneNode(true);
+      clone.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+      clone.querySelectorAll('p, div, li').forEach(el => el.append('\n'));
+      const rawText = clone.textContent || '';
+      const rawLines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
+
+      if (rawLines.length === 0) {
+        fo.remove();
+        return;
+      }
+
+      const isCluster = Boolean(fo.closest('.cluster-label, .cluster'));
+      const isEdge = Boolean(fo.closest('.edgeLabel'));
+
+      const baseFontSize = isCluster ? 12.5 : isEdge ? 11 : 12;
+      const lines = isCluster || isEdge
+        ? rawLines.map(decodeHtmlEntities)
+        : splitIntoFittingLines(rawLines, w, baseFontSize);
+
+      const textNode = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+      const centerX = x + w / 2;
+      textNode.setAttribute('x', String(centerX));
+      textNode.setAttribute('text-anchor', 'middle');
+      textNode.setAttribute('font-family', 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif');
+
+      const fontSize = lines.length > 3 ? 10.5 : lines.length > 2 ? 11 : baseFontSize;
+      const lineHeight = fontSize * 1.35;
+      const totalHeight = lines.length * lineHeight;
+      const startY = y + (h - totalHeight) / 2 + fontSize * 0.88;
+
+      textNode.setAttribute('y', String(startY));
+
+      lines.forEach((lineText, idx) => {
+        const tspan = doc.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+        tspan.setAttribute('x', String(centerX));
+        if (idx === 0) {
+          tspan.setAttribute('y', String(startY));
+        } else {
+          tspan.setAttribute('dy', `${lineHeight}px`);
+        }
+
+        if (isCluster) {
+          tspan.setAttribute('fill', '#f1f5f9');
+          tspan.setAttribute('font-size', `${fontSize}px`);
+          tspan.setAttribute('font-weight', '600');
+          tspan.setAttribute('letter-spacing', '0.2px');
+        } else if (isEdge) {
+          tspan.setAttribute('fill', '#cbd5e1');
+          tspan.setAttribute('font-size', `${fontSize}px`);
+          tspan.setAttribute('font-weight', '500');
+        } else {
+          const isSub = lineText.startsWith('(') ||
+                        lineText.startsWith('[:') ||
+                        lineText.startsWith('[') ||
+                        lineText.includes('/') ||
+                        lineText.includes('_');
+
+          if (isSub && idx > 0) {
+            tspan.setAttribute('fill', '#cbd5e1');
+            tspan.setAttribute('font-size', `${Math.max(fontSize - 1.5, 9.5)}px`);
+            tspan.setAttribute('font-weight', '400');
+          } else {
+            tspan.setAttribute('fill', '#ffffff');
+            tspan.setAttribute('font-size', `${fontSize}px`);
+            tspan.setAttribute('font-weight', '600');
+          }
+        }
+
+        tspan.textContent = lineText;
+        textNode.appendChild(tspan);
+      });
+
+      fo.parentNode?.replaceChild(textNode, fo);
+    });
+
+    const serializer = new XMLSerializer();
+    const serializedSvg = serializer.serializeToString(svgEl);
+
+    return { serializedSvg, width, height };
+  };
+
   const handleDownloadSvg = () => {
     if (!svg) return;
-    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `architecture-diagram-${Date.now()}.svg`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    try {
+      const prepared = prepareExportableSvg();
+      const content = prepared
+        ? prepared.serializedSvg
+        : svg
+            .replace(/<br>/gi, '<br/>')
+            .replace(/<hr>/gi, '<hr/>')
+            .replace(/<img\b([^>]*)(?<!\/)>/gi, '<img$1/>')
+            .replace(/<input\b([^>]*)(?<!\/)>/gi, '<input$1/>');
+
+      const blob = new Blob([content], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `architecture-diagram-${Date.now()}.svg`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.warn('Failed to export SVG:', err);
+    }
   };
 
   const handleDownloadPng = () => {
     if (!svg) return;
     try {
-      // 1. Repair unclosed void HTML tags from Mermaid HTML labels before XML DOM parsing
-      // This eliminates fatal XML parsererror ("Unexpected closing tag: </p> != <br>") that truncated nodes
-      const wellFormedSvg = svg
-        .replace(/<br>/gi, '<br/>')
-        .replace(/<hr>/gi, '<hr/>')
-        .replace(/<img\b([^>]*)(?<!\/)>/gi, '<img$1/>')
-        .replace(/<input\b([^>]*)(?<!\/)>/gi, '<input$1/>');
-
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(wellFormedSvg, 'image/svg+xml');
-      const svgEl = doc.querySelector('svg');
-      if (!svgEl) {
+      const prepared = prepareExportableSvg();
+      if (!prepared) {
         handleDownloadSvg();
         return;
       }
 
-      // Determine true diagram bounds from viewBox or attributes
-      const rawWidth = svgEl.getAttribute('width');
-      const rawHeight = svgEl.getAttribute('height');
-      const viewBox = svgEl.getAttribute('viewBox');
-
-      let width = 0;
-      let height = 0;
-
-      if (viewBox) {
-        const parts = viewBox.trim().split(/[\s,]+/).map(Number);
-        if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
-          width = parts[2];
-          height = parts[3];
-        }
-      }
-
-      if (!width || !height) {
-        if (rawWidth && !rawWidth.includes('%')) width = parseFloat(rawWidth);
-        if (rawHeight && !rawHeight.includes('%')) height = parseFloat(rawHeight);
-      }
-
-      width = width || 1200;
-      height = height || 800;
-
-      // Explicitly set width & height attributes on the SVG clone so it renders at full resolution
-      svgEl.setAttribute('width', String(width));
-      svgEl.setAttribute('height', String(height));
-
-      // Strip any external @import rules in <style> to prevent CORS canvas tainting
-      const styles = svgEl.querySelectorAll('style');
-      styles.forEach(s => {
-        if (s.textContent) {
-          s.textContent = s.textContent.replace(/@import\s+[^;]+;/gi, '');
-        }
-      });
-
-      // HTML entity decoder helper
-      const decodeHtmlEntities = (str) => {
-        return str
-          .replace(/&amp;/g, '&')
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"')
-          .replace(/&#39;/g, "'");
-      };
-
-      // Smart line breaker so multi-line text stays neatly inside node boundaries
-      const splitIntoFittingLines = (rawLines, boxWidth, fontSize) => {
-        const approxCharWidth = fontSize * 0.58;
-        const maxChars = Math.max(12, Math.floor((boxWidth - 10) / approxCharWidth));
-        const finalLines = [];
-
-        for (const line of rawLines) {
-          const decoded = decodeHtmlEntities(line).trim();
-          if (!decoded) continue;
-
-          if (decoded.length <= maxChars) {
-            finalLines.push(decoded);
-            continue;
-          }
-
-          // Break gracefully on spaces, commas, or slash separators
-          const tokens = decoded.split(/(?<=[,\s]|\s\/\s)/g);
-          let current = '';
-          for (const token of tokens) {
-            if (!current) {
-              current = token;
-            } else if ((current + token).length <= maxChars) {
-              current += token;
-            } else {
-              if (current.trim()) finalLines.push(current.trim());
-              current = token;
-            }
-          }
-          if (current.trim()) finalLines.push(current.trim());
-        }
-
-        return finalLines;
-      };
-
-      // Convert all foreignObject elements to native SVG <text>/<tspan> elements
-      // Eliminates the Chromium 'tainted canvas' SecurityError while guaranteeing 100% of node boxes, fills, and labels
-      const foreignObjects = Array.from(svgEl.querySelectorAll('foreignObject'));
-      foreignObjects.forEach(fo => {
-        const x = parseFloat(fo.getAttribute('x') || 0);
-        const y = parseFloat(fo.getAttribute('y') || 0);
-        const w = parseFloat(fo.getAttribute('width') || 0);
-        const h = parseFloat(fo.getAttribute('height') || 0);
-
-        // Convert <br>, <p>, <div> to newlines to extract lines cleanly
-        const clone = fo.cloneNode(true);
-        clone.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
-        clone.querySelectorAll('p, div, li').forEach(el => el.append('\n'));
-        const rawText = clone.textContent || '';
-        const rawLines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
-
-        if (rawLines.length === 0) {
-          fo.remove();
-          return;
-        }
-
-        const isCluster = Boolean(fo.closest('.cluster-label, .cluster'));
-        const isEdge = Boolean(fo.closest('.edgeLabel'));
-
-        const baseFontSize = isCluster ? 12.5 : isEdge ? 11 : 12;
-        const lines = isCluster || isEdge
-          ? rawLines.map(decodeHtmlEntities)
-          : splitIntoFittingLines(rawLines, w, baseFontSize);
-
-        const textNode = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-        const centerX = x + w / 2;
-        textNode.setAttribute('x', String(centerX));
-        textNode.setAttribute('text-anchor', 'middle');
-        textNode.setAttribute('font-family', 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif');
-
-        const fontSize = lines.length > 3 ? 10.5 : lines.length > 2 ? 11 : baseFontSize;
-        const lineHeight = fontSize * 1.35;
-        const totalHeight = lines.length * lineHeight;
-        const startY = y + (h - totalHeight) / 2 + fontSize * 0.88;
-
-        textNode.setAttribute('y', String(startY));
-
-        lines.forEach((lineText, idx) => {
-          const tspan = doc.createElementNS('http://www.w3.org/2000/svg', 'tspan');
-          tspan.setAttribute('x', String(centerX));
-          if (idx === 0) {
-            tspan.setAttribute('y', String(startY));
-          } else {
-            tspan.setAttribute('dy', `${lineHeight}px`);
-          }
-
-          if (isCluster) {
-            tspan.setAttribute('fill', '#f1f5f9');
-            tspan.setAttribute('font-size', `${fontSize}px`);
-            tspan.setAttribute('font-weight', '600');
-            tspan.setAttribute('letter-spacing', '0.2px');
-          } else if (isEdge) {
-            tspan.setAttribute('fill', '#cbd5e1');
-            tspan.setAttribute('font-size', `${fontSize}px`);
-            tspan.setAttribute('font-weight', '500');
-          } else {
-            const isSub = lineText.startsWith('(') ||
-                          lineText.startsWith('[:') ||
-                          lineText.startsWith('[') ||
-                          lineText.includes('/') ||
-                          lineText.includes('_');
-
-            if (isSub && idx > 0) {
-              tspan.setAttribute('fill', '#cbd5e1');
-              tspan.setAttribute('font-size', `${Math.max(fontSize - 1.5, 9.5)}px`);
-              tspan.setAttribute('font-weight', '400');
-            } else {
-              tspan.setAttribute('fill', '#ffffff');
-              tspan.setAttribute('font-size', `${fontSize}px`);
-              tspan.setAttribute('font-weight', '600');
-            }
-          }
-
-          tspan.textContent = lineText;
-          textNode.appendChild(tspan);
-        });
-
-        fo.parentNode?.replaceChild(textNode, fo);
-      });
-
-      if (!svgEl.getAttribute('xmlns')) {
-        svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-      }
-
-      const serializer = new XMLSerializer();
-      const sanitizedSvg = serializer.serializeToString(svgEl);
+      const { serializedSvg, width, height } = prepared;
 
       // 2x Retina scale for publication-ready project reports & Word/Docs
       const scale = 2;
@@ -488,7 +518,7 @@ export const MermaidViewer = React.memo(({ chart }) => {
       ctx.fillStyle = '#020617';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      const svgBlob = new Blob([sanitizedSvg], { type: 'image/svg+xml;charset=utf-8' });
+      const svgBlob = new Blob([serializedSvg], { type: 'image/svg+xml;charset=utf-8' });
       const url = URL.createObjectURL(svgBlob);
       const img = new Image();
 
