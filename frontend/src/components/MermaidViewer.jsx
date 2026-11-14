@@ -7,10 +7,10 @@ mermaid.initialize({
   startOnLoad: false,
   suppressErrorRendering: true,
   theme: 'dark',
-  htmlLabels: true,
+  htmlLabels: false,
   securityLevel: 'strict',
   flowchart: {
-    htmlLabels: true,
+    htmlLabels: false,
     useMaxWidth: true,
     curve: 'basis',
     diagramPadding: 16,
@@ -351,13 +351,14 @@ export const MermaidViewer = React.memo(({ chart }) => {
       const maxChars = Math.max(12, Math.floor((boxWidth - 10) / approxCharWidth));
       const finalLines = [];
 
-      for (const line of rawLines) {
+      rawLines.forEach((line, lineIndex) => {
         const decoded = decodeHtmlEntities(line).trim();
-        if (!decoded) continue;
+        if (!decoded) return;
+        const isSubtitle = lineIndex > 0;
 
         if (decoded.length <= maxChars) {
-          finalLines.push(decoded);
-          continue;
+          finalLines.push({ text: decoded, isSub: isSubtitle });
+          return;
         }
 
         // Break gracefully on spaces, commas, or slash separators
@@ -369,12 +370,12 @@ export const MermaidViewer = React.memo(({ chart }) => {
           } else if ((current + token).length <= maxChars) {
             current += token;
           } else {
-            if (current.trim()) finalLines.push(current.trim());
+            if (current.trim()) finalLines.push({ text: current.trim(), isSub: isSubtitle });
             current = token;
           }
         }
-        if (current.trim()) finalLines.push(current.trim());
-      }
+        if (current.trim()) finalLines.push({ text: current.trim(), isSub: isSubtitle });
+      });
 
       return finalLines;
     };
@@ -405,7 +406,7 @@ export const MermaidViewer = React.memo(({ chart }) => {
 
       const baseFontSize = isCluster ? 12.5 : isEdge ? 11 : 12;
       const lines = isCluster || isEdge
-        ? rawLines.map(decodeHtmlEntities)
+        ? rawLines.map(l => ({ text: decodeHtmlEntities(l), isSub: false }))
         : splitIntoFittingLines(rawLines, w, baseFontSize);
 
       const textNode = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -421,7 +422,7 @@ export const MermaidViewer = React.memo(({ chart }) => {
 
       textNode.setAttribute('y', String(startY));
 
-      lines.forEach((lineText, idx) => {
+      lines.forEach(({ text: lineText, isSub }, idx) => {
         const tspan = doc.createElementNS('http://www.w3.org/2000/svg', 'tspan');
         tspan.setAttribute('x', String(centerX));
         if (idx === 0) {
@@ -439,22 +440,14 @@ export const MermaidViewer = React.memo(({ chart }) => {
           tspan.setAttribute('fill', '#cbd5e1');
           tspan.setAttribute('font-size', `${fontSize}px`);
           tspan.setAttribute('font-weight', '500');
+        } else if (isSub) {
+          tspan.setAttribute('fill', '#cbd5e1');
+          tspan.setAttribute('font-size', `${Math.max(fontSize - 1.5, 9.5)}px`);
+          tspan.setAttribute('font-weight', '400');
         } else {
-          const isSub = lineText.startsWith('(') ||
-                        lineText.startsWith('[:') ||
-                        lineText.startsWith('[') ||
-                        lineText.includes('/') ||
-                        lineText.includes('_');
-
-          if (isSub && idx > 0) {
-            tspan.setAttribute('fill', '#cbd5e1');
-            tspan.setAttribute('font-size', `${Math.max(fontSize - 1.5, 9.5)}px`);
-            tspan.setAttribute('font-weight', '400');
-          } else {
-            tspan.setAttribute('fill', '#ffffff');
-            tspan.setAttribute('font-size', `${fontSize}px`);
-            tspan.setAttribute('font-weight', '600');
-          }
+          tspan.setAttribute('fill', '#ffffff');
+          tspan.setAttribute('font-size', `${fontSize}px`);
+          tspan.setAttribute('font-weight', '600');
         }
 
         tspan.textContent = lineText;
